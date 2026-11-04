@@ -386,11 +386,42 @@ push and pull request.
 - Additional automation-platform integrations
 - Multi-tenancy and billing
 
+## Vultr deployment (hackathon)
+
+This stack runs on a single Vultr Cloud Compute instance in the Mumbai (`bom`) region.
+
+| Piece | Where it runs |
+|---|---|
+| Vultr Cloud Compute | `vc2-2c-4gb` (2 vCPU / 4 GB / 80 GB) Ubuntu 24.04, `flowmedic-ai` |
+| Coolify 4.6 | Self-hosted on the same VM; builds and runs both containers |
+| FastAPI backend | `https://api.flowmedic.shubhsomani.tech` (Dockerfile build, `/data` persistent volume) |
+| Next.js dashboard | `https://flowmedic.shubhsomani.tech` (Dockerfile build, same-origin `/api/backend` proxy) |
+| TLS | Caddy issued by Coolify's built-in proxy (Let's Encrypt) |
+| DNS | Cloudflare `A` records → `65.20.70.206` |
+| Vultr firewall | inbound 80/443 public; 22/8000/6001/6002 restricted to the operator IP and GitHub hook ranges |
+| n8n upstream | existing `https://n8n.happynestfarm.in`, read-only API key |
+
+Pushes to `main` on GitHub hit two repository webhooks (`push` events, HMAC-signed with each
+Coolify application's `manual_webhook_secret_github`). Coolify matches the signature, pulls the
+commit, rebuilds the affected image and performs a rolling health-checked replacement.
+
+The browser never calls the API host directly: the dashboard uses the
+`/api/backend/[...path]` route handler, which forwards requests server-side with
+`FLOWMEDIC_API_KEY` attached. That keeps the bearer token out of the bundle, means any number of
+dashboard origins work without CORS changes, and lets the API stay closed to anonymous traffic.
+
+Redeploy by hand:
+
+```bash
+curl -X POST -H "Authorization: Bearer $COOLIFY_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"uuid":"<application-uuid>","force":true}' \
+  https://<coolify-host>:8000/api/v1/deploy
+```
+
 ## License
 
-No license file is currently included. Choose a license before inviting external reuse or
-contributions; MIT is a simple permissive option, while retaining no license keeps reuse
-rights reserved by default.
+MIT — see [`LICENSE`](LICENSE).
 
 ## Reviewer entry points
 
