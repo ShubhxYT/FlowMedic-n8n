@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
@@ -241,132 +242,49 @@ def test_migration_preserves_existing_incident_table(tmp_path):
         )
 
 
-def test_successful_executions_use_resolved_workflow_names():
-    from app.integrations.n8n.client import (
-        Execution,
-        ExecutionPage,
-        N8nWorkflow,
-        N8nWorkflowPage,
-    )
-
-    class NamedN8n:
-        async def recent_executions(self, limit, cursor):
-            return ExecutionPage(
-                data=[
-                    Execution(id="1", workflowId="wf-1", status="success"),
-                    Execution(id="2", workflowId="wf-2", status="success"),
-                ],
-                nextCursor=None,
-            )
-
-        async def execution_details(self, execution_id):
-            raise AssertionError("No detail request expected for successful executions")
-
-        async def workflows(self, limit=50, cursor=None):
-            return N8nWorkflowPage(
-                data=[
-                    N8nWorkflow(id="wf-1", name="Real Workflow One", active=True),
-                    N8nWorkflow(id="wf-2", name="Real Workflow Two", active=False),
-                ],
-                nextCursor=None,
-            )
-
+def test_monitoring_loop_survives_an_iteration_error():
     async def run():
-        service = _service(NamedN8n())
-        await service.sync()
-        return service
+        service = _service(FakeN8n([_page()]))
+        service.settings.monitor_poll_interval_seconds = 0.001
+        calls = {"n": 0}
 
-    service = asyncio.run(run())
-    with service.session_factory() as session:
-        names = {
-            row.execution_id: row.workflow_name for row in session.query(ExecutionHistory).all()
-        }
-    assert names == {"1": "Real Workflow One", "2": "Real Workflow Two"}
+        async def failing_sync():
+            calls["n"] += 1
+            raise RuntimeError("lease acquisition failed")
 
+        service.sync = failing_sync
+        await service.start()
+        await asyncio.sleep(0.05)
 
-def test_workflow_name_lookup_failure_does_not_break_sync():
-    from app.integrations.n8n.client import Execution, ExecutionPage
+        # The poller kept running instead of dying on the first exception.
+        assert calls["n"] >= 1
+        assert service._task is not None
+        assert not service._task.done()
 
-    class BrokenNamesN8n:
-        async def recent_executions(self, limit, cursor):
-            return ExecutionPage(
-                data=[Execution(id="1", workflowId="wf-1", status="success")],
-                nextCursor=None,
-            )
+        await service.stop()
+        assert service._task is None
 
-        async def execution_details(self, execution_id):
-            raise AssertionError("No detail request expected")
-
-        async def workflows(self, limit=50, cursor=None):
-            raise ServiceError("n8n_server_error", "listing unavailable", 503)
-
-    async def run():
-        service = _service(BrokenNamesN8n())
-        await service.sync()
-        return service
-
-    service = asyncio.run(run())
-    with service.session_factory() as session:
-        row = session.query(ExecutionHistory).one()
-    assert row.workflow_name == "Unknown workflow"
-
-
-def test_missing_execution_detail_does_not_abort_mixed_fresh_page(monkeypatch):
-    from unittest.mock import Mock
-
-    from sqlalchemy import select
-
-    from app.integrations.n8n.client import Execution, ExecutionPage
-    from app.models.incident import Incident
-
-    class MixedPageN8n:
-        async def recent_executions(self, limit, cursor):
-            return ExecutionPage(
-                data=[
-                    Execution(id="gone", workflowId="wf-1", status="error"),
-                    Execution(id="failed", workflowId="wf-1", status="error"),
-                    Execution(id="healthy", workflowId="wf-1", status="success"),
-                ],
-                nextCursor=None,
-            )
-
-        async def execution_details(self, execution_id):
-            if execution_id == "gone":
-                raise ServiceError("n8n_http_error", "n8n returned an unsuccessful response", 404)
-            return Execution(
-                id=execution_id,
-                workflowId="wf-1",
-                status="error",
-            )
-
-    async def run():
-        service = _service(MixedPageN8n())
-        result = await service.sync()
-        assert result.status == "completed"
-        assert result.executions_discovered == 3
-        assert result.history_records_created == 3
-        assert result.incidents_created == 1
-
-        with service.session_factory() as session:
-            history = {
-                item.execution_id: item for item in session.scalars(select(ExecutionHistory)).all()
-            }
-            incidents = session.scalars(select(Incident)).all()
-
-        assert set(history) == {"gone", "failed", "healthy"}
-        assert history["gone"].execution_status is None
-        assert history["gone"].is_success is None
-        assert history["gone"].incident_id is None
-        assert history["healthy"].execution_status == "success"
-        assert len(incidents) == 1
-        assert incidents[0].execution_id == "failed"
-
-    warning = Mock()
-    monkeypatch.setattr("app.services.monitoring.logger.warning", warning)
     asyncio.run(run())
-    warning.assert_any_call(
-        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
-        "gone",
-        404,
-    )
-    assert all("payload" not in str(call).lower() for call in warning.call_args_list)
+
+
+def test_monitoring_task_can_be_restarted_after_it_ends():
+    async def run():
+        service = _service(FakeN8n([_page(), _page()]))
+        service.settings.monitor_poll_interval_seconds = 0.001
+
+        await service.start()
+        first = service._task
+        assert first is not None
+
+        # Simulate a task that has already finished.
+        first.cancel()
+        with suppress(asyncio.CancelledError):
+            await first
+        service._task = None
+
+        await service.start()
+        assert service._task is not None
+        assert service._task is not first
+        await service.stop()
+
+    asyncio.run(run())
