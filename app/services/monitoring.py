@@ -58,7 +58,9 @@ class MonitoringService:
         )
 
     async def start(self) -> None:
-        if not self.enabled or self._task is not None:
+        if not self.enabled:
+            return
+        if self._task is not None and not self._task.done():
             return
         self._stopping = False
         self._task = asyncio.create_task(self._loop(), name="flowmedic-monitor")
@@ -77,12 +79,22 @@ class MonitoringService:
         logger.info("monitoring_loop_stopped")
 
     async def _loop(self) -> None:
-        while not self._stopping:
-            try:
-                await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
-            except asyncio.CancelledError:
-                raise
-            await self.sync()
+        # sync() handles its own failures, but the lease/alerts paths around it can
+        # still raise. A background poller must never die from one bad iteration.
+        try:
+            while not self._stopping:
+                try:
+                    await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
+                except asyncio.CancelledError:
+                    raise
+                try:
+                    await self.sync()
+                except Exception:
+                    logger.exception("monitoring_loop_iteration_failed")
+        finally:
+            if not self._stopping:
+                logger.error("monitoring_loop_exited_unexpectedly")
+            self._task = None
 
     def status(self) -> MonitoringStatus:
         with self.session_factory() as session:
