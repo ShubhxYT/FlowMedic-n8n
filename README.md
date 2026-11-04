@@ -393,7 +393,7 @@ This stack runs on a single Vultr Cloud Compute instance in the Mumbai (`bom`) r
 | Piece | Where it runs |
 |---|---|
 | Vultr Cloud Compute | `vc2-2c-4gb` (2 vCPU / 4 GB / 80 GB) Ubuntu 24.04, `flowmedic-ai` |
-| Coolify 4.6 | Self-hosted on the same VM; builds and runs both containers |
+| Coolify 4.6 | Self-hosted on the same VM at `https://coolify.vultr.shubhsomani.tech`; builds and runs both containers |
 | FastAPI backend | `https://api.flowmedic.shubhsomani.tech` (Dockerfile build, `/data` persistent volume) |
 | Next.js dashboard | `https://flowmedic.shubhsomani.tech` (Dockerfile build, same-origin `/api/backend` proxy) |
 | TLS | Caddy issued by Coolify's built-in proxy (Let's Encrypt) |
