@@ -1,6 +1,6 @@
 # FlowMedic AI
 
-[![CI](https://github.com/engdareenbassamesleem/flowmedic-ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/engdareenbassamesleem/flowmedic-ai/actions/workflows/ci.yml)
+[![CI](https://github.com/ShubhxYT/FlowMedic-n8n/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShubhxYT/FlowMedic-n8n/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
