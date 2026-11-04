@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: flowmedic-demo-api
+    runtime: python
+    plan: free
+    buildCommand: pip install .
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --no-access-log
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: DEMO_MODE
+        value: "true"
+      - key: PUBLIC_DEMO_READONLY
+        value: "true"
+      - key: DATABASE_URL
+        value: sqlite:////tmp/flowmedic-demo.db
+      - key: N8N_API_KEY
+        value: ""
+      - key: AI_API_KEY
+        value: ""

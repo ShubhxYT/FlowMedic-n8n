@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////data/flowmedic.db
+    volumes:
+      - flowmedic-data:/data
+    restart: unless-stopped
+  dashboard:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+volumes:
+  flowmedic-data:
