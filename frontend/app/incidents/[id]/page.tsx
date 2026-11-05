@@ -17,7 +17,7 @@ export default function IncidentDetailPage() {
   const incident = useApi(() => api.incident(params.id), params.id);
 
   async function diagnose(current: Incident): Promise<Incident> {
-    const updated = // "Run again" is the explicit opt-in to repeat (paid) diagnosis.
+    // "Run again" is the explicit opt-in to repeat (paid) diagnosis.
     const updated = await api.diagnose(current.id, current.diagnosis !== null);
     await incident.refresh();
     return updated;
