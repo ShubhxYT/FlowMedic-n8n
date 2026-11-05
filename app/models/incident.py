@@ -49,6 +49,7 @@ class Incident(Base):
     severity: Mapped[str] = mapped_column(String(20))
     diagnosis: Mapped[dict | None] = mapped_column(JSON)
     diagnosis_provider: Mapped[str | None] = mapped_column(String(50))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MonitoringCheckpoint(Base):

@@ -1,4 +1,4 @@
-export type IncidentStatus = "open" | "diagnosed";
+export type IncidentStatus = "open" | "diagnosed" | "resolved";
 export type Severity = "medium" | "high";
 export type RiskLevel = "low" | "medium" | "high";
 
@@ -26,6 +26,7 @@ export interface Incident {
   status: IncidentStatus;
   diagnosis: Diagnosis | null;
   diagnosis_provider: string | null;
+  resolved_at: string | null;
 }
 
 export interface Workflow {

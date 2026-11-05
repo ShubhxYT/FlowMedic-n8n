@@ -173,6 +173,6 @@ def test_file_backed_app_startup_does_not_run_alembic_migrations(tmp_path, monke
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0005_gui_connections"
+            assert revision == "0006_incident_resolution"
     finally:
         engine.dispose()

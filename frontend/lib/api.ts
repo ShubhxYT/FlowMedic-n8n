@@ -87,6 +87,12 @@ export const api = {
   systemStatus: () => request<SystemStatus>("/api/v1/system/status"),
   monitoringStatus: (id: string | null = null) => request<MonitoringStatusPage>(scopedPath("/api/v1/monitoring/status", id)),
   monitoringSync: (id: string) => request(scopedPath("/api/v1/monitoring/sync", id), { method: "POST" }),
+  resolveIncident: (id: string) =>
+    request<Incident>(`/api/v1/incidents/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "resolved" }),
+    }),
   alertRules: () => request<AlertRulePage>("/api/v1/alerts/rules"),
   alertEvents: (id: string | null = null, limit = 50, offset = 0) =>
     request<AlertEventPage>(scopedPath("/api/v1/alerts/events", id, {limit: String(limit), offset: String(offset)})),

@@ -8,7 +8,7 @@ const incident: Incident = {
   instance_id: "instance-1", workspace_id: "workspace-1",
   id: "incident-1", workflow_id: "workflow-1", workflow_name: "Order import", execution_id: "execution-1",
   failed_node: "Fetch orders", error_type: "NodeApiError", error_message: "401 Unauthorized", execution_timestamp: null,
-  severity: "high", status: "open", diagnosis: null, diagnosis_provider: null,
+  severity: "high", status: "open", diagnosis: null, diagnosis_provider: null, resolved_at: null,
 };
 
 describe("DiagnosisPanel", () => {

@@ -267,6 +267,7 @@ by default; `API_DOCS_ENABLED=true` enables them for private development only.
 | `GET` | `/api/v1/executions/failed` | Normalized failures from a recent execution page |
 | `POST` | `/api/v1/incidents/sync` | Explicitly ingest failures into persistent incidents |
 | `GET` | `/api/v1/incidents` | List persisted incidents with offset pagination |
+| `PATCH` | `/api/v1/incidents/{incident_id}` | Resolve an incident with `{"status": "resolved"}`; sets `resolved_at`, keeps it in history, and stops it counting toward workflow health |
 | `GET` | `/api/v1/incidents/{incident_id}` | Read one incident |
 | `POST` | `/api/v1/incidents/{incident_id}/diagnose` | Generate and persist an advisory diagnosis; an existing diagnosis requires `?force=true` (409 otherwise) |
 | `GET`, `POST`, `PATCH` | `/api/v1/alerts/rules` | View or explicitly configure mock or configured-webhook alert rules |
