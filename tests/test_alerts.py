@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from alembic.config import Config
-from sqlalchemy import inspect, select
+from sqlalchemy import insert, inspect, select
 
 from alembic import command
 from app.api.routes import sync_incidents
@@ -332,8 +332,9 @@ def test_alerting_migration_preserves_pre_phase_four_incident_data(tmp_path):
         "severity": "high",
     }
     with factory() as session:
-        session.add(
-            Incident(
+        # Core insert: the ORM would also write columns added by later revisions.
+        session.execute(
+            insert(Incident.__table__).values(
                 **original,
                 execution_timestamp=datetime(2026, 9, 1, tzinfo=UTC),
                 diagnosis=None,

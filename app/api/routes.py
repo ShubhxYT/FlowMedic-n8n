@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from app.schemas.domain import (
     FailurePage,
     IncidentOut,
     IncidentPage,
+    IncidentUpdate,
     MonitoringStatus,
     MonitoringSyncResult,
     OverviewMetrics,
@@ -282,6 +284,17 @@ async def diagnose(incident_id: UUID, request: Request, session: DB):
     diagnosis = await provider.diagnose(context)
     incident.diagnosis = diagnosis.model_dump()
     incident.diagnosis_provider = provider.name
-    incident.status = "diagnosed"
+    if incident.status != "resolved":  # a diagnosis must not silently reopen a resolved incident
+        incident.status = "diagnosed"
     session.commit()
+    return incident
+
+
+@router.patch("/incidents/{incident_id}", response_model=IncidentOut)
+def update_incident(incident_id: UUID, payload: IncidentUpdate, session: DB):
+    incident = require_incident(session, incident_id)
+    if incident.status != "resolved":  # idempotent: keep the original resolved_at
+        incident.status = payload.status
+        incident.resolved_at = datetime.now(UTC)
+        session.commit()
     return incident

@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Diagnosis(BaseModel):
@@ -28,9 +28,21 @@ class Failure(BaseModel):
 class IncidentOut(Failure):
     model_config = ConfigDict(from_attributes=True)
     id: str
-    status: Literal["open", "diagnosed"]
+    status: Literal["open", "diagnosed", "resolved"]
     diagnosis: Diagnosis | None = None
     diagnosis_provider: str | None = None
+    resolved_at: datetime | None = None
+
+    @field_validator("resolved_at")
+    @classmethod
+    def resolved_at_is_utc(cls, value):
+        # SQLite returns naive datetimes; they are always stored as UTC.
+        return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
+
+
+class IncidentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["resolved"]
 
 
 class Workflow(BaseModel):
