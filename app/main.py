@@ -27,7 +27,6 @@ from app.services.alerts import (
 )
 from app.services.monitoring import MonitoringService
 
-
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
