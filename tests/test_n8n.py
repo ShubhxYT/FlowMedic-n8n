@@ -106,3 +106,11 @@ def test_detail_fetch_rechecks_status_and_preserves_cursor(execution):
     assert [item.id for item in failures] == ["42"]
     assert cursor == "cursor-2" and scanned == 2
     assert paths == ["/api/v1/executions", "/api/v1/executions/42"]
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_http_error_preserves_status_code(status):
+    with pytest.raises(ServiceError) as exc:
+        run_client(lambda request: httpx.Response(status, json={"message": "Not Found"}))
+    assert exc.value.code == "n8n_http_error"
+    assert exc.value.status_code == status
