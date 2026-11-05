@@ -70,5 +70,8 @@ export const api = {
   incidents: (limit = 50, offset = 0) =>
     request<IncidentPage>(`/api/v1/incidents?limit=${limit}&offset=${offset}`),
   incident: (id: string) => request<Incident>(`/api/v1/incidents/${id}`),
-  diagnose: (id: string) => request<Incident>(`/api/v1/incidents/${id}/diagnose`, { method: "POST" }),
+  diagnose: (id: string, force = false) =>
+    request<Incident>(`/api/v1/incidents/${id}/diagnose${force ? "?force=true" : ""}`, {
+      method: "POST",
+    }),
 };

@@ -275,8 +275,20 @@ def incident(incident_id: UUID, session: DB):
 
 
 @router.post("/incidents/{incident_id}/diagnose", response_model=IncidentOut)
-async def diagnose(incident_id: UUID, request: Request, session: DB):
+async def diagnose(incident_id: UUID, request: Request, session: DB, force: bool = False):
     incident = require_incident(session, incident_id)
+    if incident.diagnosis is not None and not force:
+        raise ServiceError(
+            "already_diagnosed",
+            "Incident already has a diagnosis; pass force=true to re-diagnose",
+            409,
+        )
+    # Per-caller budget: bearer token when supplied, otherwise the client address.
+    caller = request.headers.get("Authorization") or (
+        request.client.host if request.client else "unknown"
+    )
+    if not request.app.state.diagnose_limiter.allow(caller):
+        raise ServiceError("rate_limited", "Too many diagnosis requests; try again shortly", 429)
     context = Failure.model_validate(incident, from_attributes=True)
     provider = request.app.state.provider
     diagnosis = await provider.diagnose(context)
