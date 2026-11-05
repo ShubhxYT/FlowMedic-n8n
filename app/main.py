@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.core.database import create_database
 from app.core.errors import ServiceError
 from app.core.migrations import upgrade_database
+from app.core.ratelimit import RateLimiter
 from app.demo import demo_failure, seed_demo_history
 from app.integrations.n8n.client import N8nClient
 from app.models.incident import Base
@@ -25,6 +26,9 @@ from app.services.alerts import (
     WebhookAlertDeliveryProvider,
 )
 from app.services.monitoring import MonitoringService
+
+
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def error_response(code, message, status_code):
@@ -101,6 +105,7 @@ def create_app(
 
     app = FastAPI(title="FlowMedic AI", version="0.1.0", lifespan=lifespan)
     app.state.settings = config
+    app.state.diagnose_limiter = RateLimiter(config.diagnose_rate_limit_per_minute, 60)
 
     @app.middleware("http")
     async def readonly_public_demo(request: Request, call_next):
@@ -112,6 +117,18 @@ def create_app(
     @app.middleware("http")
     async def authentication(request: Request, call_next):
         key = config.flowmedic_api_key.get_secret_value()
+        if (
+            not key
+            and request.method in MUTATING_METHODS
+            and request.url.path != "/health"
+            and not config.allow_unauthenticated_mutations
+            and not config.public_demo_readonly  # the read-only demo middleware rejects these
+        ):
+            return error_response(
+                "auth_not_configured",
+                "FLOWMEDIC_API_KEY must be set before mutating routes can be used",
+                503,
+            )
         if key and request.url.path != "/health":
             expected = ("Bearer " + key).encode()
             supplied = request.headers.get("Authorization", "").encode()
@@ -151,7 +168,8 @@ def create_app(
     app.include_router(
         router,
         responses={
-            status: {"model": ErrorResponse} for status in (401, 404, 422, 500, 502, 503, 504)
+            status: {"model": ErrorResponse}
+            for status in (401, 404, 409, 422, 429, 500, 502, 503, 504)
         },
     )
     # Handle browser preflight before bearer checks and add CORS to safe errors.

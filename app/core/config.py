@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = "gpt-4.1-mini"
     flowmedic_api_key: SecretStr = SecretStr("")
+    # Local-development escape hatch. Without FLOWMEDIC_API_KEY, mutating routes fail closed (503)
+    # unless this is explicitly enabled.
+    allow_unauthenticated_mutations: bool = False
+    diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
     demo_mode: bool = False
     public_demo_readonly: bool = False
     cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
