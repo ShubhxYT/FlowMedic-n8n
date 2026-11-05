@@ -24,19 +24,23 @@ class HealthCounts:
     success_count: int
     failure_count: int
     open_incident_count: int
+    # Failures already acknowledged by resolving their incident; they stay in the history
+    # but no longer make the workflow unhealthy.
+    resolved_failure_count: int = 0
 
 
 def classify_health(counts: HealthCounts) -> str:
     """Return a deterministic state from the persisted, classified execution window."""
     if counts.execution_count == 0 or counts.success_count + counts.failure_count == 0:
         return "unknown"
+    failures = counts.failure_count - counts.resolved_failure_count
     if (
-        counts.failure_count >= 2
-        or (counts.failure_count > 0 and counts.success_count == 0)
+        failures >= 2
+        or (failures > 0 and counts.success_count == 0)
         or counts.open_incident_count >= 2
     ):
         return "unhealthy"
-    if counts.failure_count > 0 or counts.open_incident_count > 0:
+    if failures > 0 or counts.open_incident_count > 0:
         return "degraded"
     return "healthy"
 
@@ -54,6 +58,7 @@ def build_workflow_health(
     by_workflow: dict[str, list[ExecutionHistory]] = defaultdict(list)
     for item in history:
         by_workflow[item.workflow_id].append(item)
+    resolved_ids = {incident.id for incident in incidents if incident.status == "resolved"}
     open_counts: dict[str, int] = defaultdict(int)
     for incident in incidents:
         if incident.status == "open":
@@ -70,6 +75,9 @@ def build_workflow_health(
             success_count=success_count,
             failure_count=failure_count,
             open_incident_count=open_counts[workflow_id],
+            resolved_failure_count=sum(
+                item.is_success is False and item.incident_id in resolved_ids for item in recent
+            ),
         )
         newest = recent[0]
         known_names = [
