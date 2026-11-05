@@ -1,34 +1,41 @@
-from datetime import UTC
+import re
+from typing import Literal
 
-from app.core.security import sanitize
-from app.integrations.n8n.client import Execution, is_failed
-from app.schemas.domain import Failure
+Severity = Literal["high", "medium", "low"]
+
+_STATUS_RE = re.compile(r"(?i)\b(?:status(?:\s+code)?|http(?:\s+code)?)\D{0,3}([1-5]\d{2})\b")
+_AUTH_RE = re.compile(r"(?i)\b(?:unauthori[sz]ed|forbidden|authori[sz]ation failed|invalid credentials)\b")
+_TIMEOUT_RE = re.compile(r"(?i)\b(?:ETIMEDOUT|ESOCKETTIMEDOUT|timed?[\s-]?out|timeout)\b")
+_NETWORK_RE = re.compile(
+    r"\b(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH)\b"
+    r"|(?i:getaddrinfo|dns lookup|could not resolve)"
+)
 
 
-def normalize(execution: Execution, secrets=()) -> Failure:
-    if not is_failed(execution):
-        raise ValueError("Only failed executions can become incidents")
-    result = (execution.data or {}).get("resultData")
-    result = result if isinstance(result, dict) else {}
-    error = result.get("error")
-    error = error if isinstance(error, dict) else {}
-    node = error.get("node")
-    node = node.get("name") if isinstance(node, dict) else None
-    node = node or result.get("lastNodeExecuted")
-    # Never retain runData, node inputs/outputs, credentials, or the source error object.
-    return Failure(
-        execution_id=execution.id,
-        workflow_id=execution.workflowId,
-        workflow_name=sanitize((execution.workflowData or {}).get("name") or "Unknown", secrets),
-        failed_node=sanitize(node, secrets) if isinstance(node, str) else None,
-        error_type=sanitize(error.get("name") or "UnknownError", secrets),
-        error_message=sanitize(error.get("message") or "Insufficient failure information", secrets),
-        execution_timestamp=(
-            execution.startedAt.replace(tzinfo=UTC)
-            if execution.startedAt and execution.startedAt.tzinfo is None
-            else execution.startedAt.astimezone(UTC)
-            if execution.startedAt
-            else None
-        ),
-        severity="high" if execution.status == "crashed" else "medium",
-    )
+def _http_code(error: dict, message: str) -> int | None:
+    for key in ("httpCode", "statusCode"):
+        try:
+            return int(error[key])
+        except (KeyError, TypeError, ValueError):
+            pass
+    match = _STATUS_RE.search(message)
+    return int(match.group(1)) if match else None
+
+
+def classify_severity(status: str | None, error: dict) -> Severity:
+    """Heuristic severity from execution status and the (unsanitized) n8n error."""
+    if status == "crashed":
+        return "high"
+    message = str(error.get("message") or "")
+    description = str(error.get("description") or "")
+    text = f"{message} {description}"
+    code = _http_code(error, text)
+    if code in (401, 403) or (code is not None and 500 <= code <= 599):
+        return "high"
+    if _AUTH_RE.search(text):
+        return "high"
+    if _TIMEOUT_RE.search(text):  # timeouts stay medium, checked before connect errors
+        return "medium"
+    if _NETWORK_RE.search(text):
+        return "high"
+    return "medium"
