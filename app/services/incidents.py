@@ -21,7 +21,9 @@ def normalize(execution: Execution, secrets=()) -> Failure:
         workflow_id=execution.workflowId,
         workflow_name=sanitize((execution.workflowData or {}).get("name") or "Unknown", secrets),
         failed_node=sanitize(node, secrets) if isinstance(node, str) else None,
-        error_type=sanitize(error.get("name") or "UnknownError", secrets),
+        error_type=sanitize(
+            error.get("name") or error.get("description") or "UnknownError", secrets
+        ),
         error_message=sanitize(error.get("message") or "Insufficient failure information", secrets),
         execution_timestamp=(
             execution.startedAt.replace(tzinfo=UTC)
