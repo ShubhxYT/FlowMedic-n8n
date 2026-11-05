@@ -48,6 +48,7 @@ class MonitoringService:
         self._owner_id = str(uuid.uuid4())
         self._state = "disabled" if not self.enabled else "idle"
         self._stopping = False
+        self._last_poller_beat: datetime | None = None
 
     @property
     def enabled(self) -> bool:
@@ -57,10 +58,22 @@ class MonitoringService:
             and self.settings.n8n_api_key.get_secret_value()
         )
 
+    @property
+    def poller_alive(self) -> bool:
+        """Returns True if the background task is running and has beat recently."""
+        if self._task is None or self._task.done():
+            return False
+        if self._last_poller_beat is None:
+            return True  # Just started, hasn't ticked yet
+        # If the task hasn't updated its beat within 3x the poll interval + 10s grace, it's considered dead/stuck
+        threshold = timedelta(seconds=(self.settings.monitor_poll_interval_seconds * 3) + 10)
+        return utc_now() - self._last_poller_beat < threshold
+
     async def start(self) -> None:
         if not self.enabled or self._task is not None:
             return
         self._stopping = False
+        self._last_poller_beat = utc_now()
         self._task = asyncio.create_task(self._loop(), name="flowmedic-monitor")
         logger.info(
             "monitoring_loop_started interval_seconds=%s",
@@ -77,12 +90,30 @@ class MonitoringService:
         logger.info("monitoring_loop_stopped")
 
     async def _loop(self) -> None:
-        while not self._stopping:
-            try:
-                await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
-            except asyncio.CancelledError:
-                raise
-            await self.sync()
+        try:
+            while not self._stopping:
+                self._last_poller_beat = utc_now()
+                try:
+                    await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
+                except asyncio.CancelledError:
+                    raise
+                
+                if self._stopping:
+                    break
+
+                try:
+                    await self.sync()
+                except Exception:
+                    logger.exception("monitoring_loop_iteration_failed")
+                    # Backoff slightly on unexpected top-level loop crashes to prevent tight error loops
+                    await asyncio.sleep(min(self.settings.monitor_poll_interval_seconds, 5))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("monitoring_loop_fatal_crash")
+        finally:
+            self._task = None
+            logger.info("monitoring_loop_exited_and_rearmed")
 
     def status(self) -> MonitoringStatus:
         with self.session_factory() as session:
@@ -97,9 +128,15 @@ class MonitoringService:
                 lease_state = "active" if checkpoint.lease_owner_id == self._owner_id else "standby"
             else:
                 lease_state = "unclaimed"
+
+            # Determine actual runtime state incorporating poller liveness
+            current_state = "disabled" if not self.enabled else self._state
+            if self.enabled and current_state != "disabled" and not self.poller_alive and self._task is not None:
+                current_state = "unhealthy"
+
             return MonitoringStatus(
                 enabled=self.enabled,
-                state="disabled" if not self.enabled else self._state,
+                state=current_state,
                 poll_interval_seconds=self.settings.monitor_poll_interval_seconds,
                 last_checked_at=checkpoint.last_checked_at if checkpoint else None,
                 last_fresh_poll_at=checkpoint.last_fresh_poll_at if checkpoint else None,
