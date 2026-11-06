@@ -11,10 +11,19 @@ const labels = {
   workflow_unhealthy: "Workflow unhealthy",
   monitoring_degraded: "Monitoring degraded",
 };
-
+const POLL_INTERVAL_MS = 30_000;
 export default function AlertsPage() {
-  const rules = useApi(() => api.alertRules());
-  const events = useApi(() => api.alertEvents());
+  const rules = useApi(
+  () => api.alertRules(),
+  "initial",
+  { pollIntervalMs: POLL_INTERVAL_MS },
+);
+
+  const events = useApi(
+    () => api.alertEvents(),
+    "initial",
+    { pollIntervalMs: POLL_INTERVAL_MS },
+  );
   const error = rules.error ?? events.error;
 
   return (

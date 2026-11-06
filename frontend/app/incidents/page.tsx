@@ -10,13 +10,18 @@ import type { IncidentStatus, Severity } from "@/lib/types";
 import { useApi } from "@/lib/use-api";
 
 const pageSize = 20;
+const POLL_INTERVAL_MS = 30_000;
 
 export default function IncidentsPage() {
   const [page, setPage] = useState(0);
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [status, setStatus] = useState<IncidentStatus | "all">("all");
   const [query, setQuery] = useState("");
-  const incidents = useApi(() => api.incidents(pageSize, page * pageSize), `page-${page}`);
+  const incidents = useApi(
+  () => api.incidents(pageSize, page * pageSize),
+  `page-${page}`,
+  { pollIntervalMs: POLL_INTERVAL_MS },
+);
 
   const rows = useMemo(() => (incidents.data?.data ?? []).filter((incident) => {
     const matchesSeverity = severity === "all" || incident.severity === severity;
