@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,9 @@ TRANSIENT_CODES = {
     "n8n_rate_limited",
     "n8n_server_error",
 }
+WORKFLOW_NAMES_TTL = 300
+WORKFLOW_NAMES_PAGE_SIZE = 250
+WORKFLOW_NAMES_MAX_PAGES = 4
 
 
 def utc_now() -> datetime:
@@ -48,6 +52,7 @@ class MonitoringService:
         self._owner_id = str(uuid.uuid4())
         self._state = "disabled" if not self.enabled else "idle"
         self._stopping = False
+        self._names_cache: tuple[float, dict[str, str]] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -209,10 +214,16 @@ class MonitoringService:
             prior_backfill_cursor = checkpoint.backfill_cursor or checkpoint.cursor_value
             session.commit()
 
+        # The executions list omits workflowData, so successful runs would otherwise
+        # be stored as "Unknown workflow". Resolve ids to names once per cycle.
+        workflow_names = await self._workflow_names()
+
         logger.info("fresh_poll_started")
         fresh_page = await self.n8n.recent_executions(self.settings.monitor_page_size, None)
         fresh_entries = await self._hydrate(fresh_page)
-        fresh_counts = self._persist_fresh_page(fresh_entries, fresh_page, prior_backfill_cursor)
+        fresh_counts = self._persist_fresh_page(
+            fresh_entries, fresh_page, prior_backfill_cursor, workflow_names
+        )
         logger.info("fresh_poll_completed executions_discovered=%s", len(fresh_entries))
 
         discovered, history_created, incidents_created = fresh_counts
@@ -227,7 +238,7 @@ class MonitoringService:
                 self._heartbeat_lease()
                 page = await self.n8n.recent_executions(self.settings.monitor_page_size, cursor)
                 entries = await self._hydrate(page)
-                counts, cursor = self._persist_backfill_page(entries, page)
+                counts, cursor = self._persist_backfill_page(entries, page, workflow_names)
                 discovered += counts[0]
                 history_created += counts[1]
                 incidents_created += counts[2]
@@ -253,13 +264,42 @@ class MonitoringService:
                 entries.append(execution)
         return entries
 
+    async def _workflow_names(self) -> dict[str, str]:
+        """Resolve workflow ids to names, cached for WORKFLOW_NAMES_TTL seconds.
+
+        Failures are non-fatal: monitoring must keep working even if the workflow
+        listing endpoint is unavailable or the test double does not implement it.
+        """
+        now = time.monotonic()
+        if self._names_cache is not None and now - self._names_cache[0] < WORKFLOW_NAMES_TTL:
+            return self._names_cache[1]
+        fetch = getattr(self.n8n, "workflows", None)
+        if fetch is None:
+            return {}
+        names: dict[str, str] = {}
+        cursor = None
+        try:
+            for _ in range(WORKFLOW_NAMES_MAX_PAGES):
+                page = await fetch(limit=WORKFLOW_NAMES_PAGE_SIZE, cursor=cursor)
+                for workflow in page.data:
+                    names[workflow.id] = workflow.name
+                cursor = page.nextCursor
+                if not cursor:
+                    break
+        except Exception:
+            logger.warning("workflow_names_unavailable")
+            return self._names_cache[1] if self._names_cache else {}
+        self._names_cache = (now, names)
+        return names
+
     def _persist_fresh_page(
         self,
         entries: list[Execution],
         page: ExecutionPage,
         prior_backfill_cursor: str | None,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[int, int, int]:
-        counts = self._persist_entries(entries)
+        counts = self._persist_entries(entries, workflow_names or {})
         with self.session_factory() as session:
             checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
             now = utc_now()
@@ -286,8 +326,9 @@ class MonitoringService:
         self,
         entries: list[Execution],
         page: ExecutionPage,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[tuple[int, int, int], str | None]:
-        counts = self._persist_entries(entries)
+        counts = self._persist_entries(entries, workflow_names or {})
         with self.session_factory() as session:
             checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
             now = utc_now()
@@ -302,7 +343,10 @@ class MonitoringService:
             session.commit()
         return (len(entries), *counts), page.nextCursor
 
-    def _persist_entries(self, entries: list[Execution]) -> tuple[int, int]:
+    def _persist_entries(
+        self, entries: list[Execution], workflow_names: dict[str, str] | None = None
+    ) -> tuple[int, int]:
+        workflow_names = workflow_names or {}
         with self.session_factory() as session:
             history = ExecutionHistoryRepository(session)
             incidents = IncidentRepository(session)
@@ -314,7 +358,7 @@ class MonitoringService:
                 record, inserted = history.create_once(
                     source=SOURCE,
                     workflow_id=detail.workflowId,
-                    workflow_name=sanitize(self._workflow_name(detail), secrets),
+                    workflow_name=sanitize(self._workflow_name(detail, workflow_names), secrets),
                     execution_id=detail.id,
                     execution_status=detail.status,
                     recorded_at=utc_now(),
@@ -417,6 +461,8 @@ class MonitoringService:
         )
 
     @staticmethod
-    def _workflow_name(execution: Execution) -> str:
+    def _workflow_name(execution: Execution, workflow_names: dict[str, str] | None = None) -> str:
         value = (execution.workflowData or {}).get("name")
+        if not (isinstance(value, str) and value):
+            value = (workflow_names or {}).get(execution.workflowId)
         return value if isinstance(value, str) and value else "Unknown workflow"
