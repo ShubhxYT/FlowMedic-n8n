@@ -41,6 +41,20 @@ class MockDiagnosisProvider:
         )
 
 
+def _sanitize_failure(context: Failure, secrets: tuple[str, ...]) -> Failure:
+    """Defense in depth: never place unsanitized failure text in an external prompt."""
+    return context.model_copy(
+        update={
+            "workflow_name": sanitize(context.workflow_name, secrets),
+            "failed_node": (
+                sanitize(context.failed_node, secrets) if context.failed_node is not None else None
+            ),
+            "error_type": sanitize(context.error_type, secrets),
+            "error_message": sanitize(context.error_message, secrets),
+        }
+    )
+
+
 class CompatibleAIProvider:
     """Provider for OpenAI-compatible chat completions with strict JSON schema output."""
 
@@ -52,6 +66,12 @@ class CompatibleAIProvider:
 
     async def diagnose(self, context: Failure) -> Diagnosis:
         try:
+            secrets = (
+                self.settings.ai_api_key.get_secret_value(),
+                self.settings.n8n_api_key.get_secret_value(),
+                self.settings.flowmedic_api_key.get_secret_value(),
+            )
+            context = _sanitize_failure(context, secrets)
             response = await self.client.post(
                 self.settings.ai_base_url + "/chat/completions",
                 headers={"Authorization": "Bearer " + self.settings.ai_api_key.get_secret_value()},
@@ -83,11 +103,6 @@ class CompatibleAIProvider:
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             diagnosis = Diagnosis.model_validate(json.loads(content))
-            secrets = (
-                self.settings.ai_api_key.get_secret_value(),
-                self.settings.n8n_api_key.get_secret_value(),
-                self.settings.flowmedic_api_key.get_secret_value(),
-            )
             return Diagnosis.model_validate(
                 {
                     key: sanitize(value, secrets) if isinstance(value, str) else value
