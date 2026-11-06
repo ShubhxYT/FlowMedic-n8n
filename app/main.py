@@ -13,7 +13,6 @@ from app.api.routes import router
 from app.core.config import Settings
 from app.core.database import create_database
 from app.core.errors import ServiceError
-from app.core.migrations import upgrade_database
 from app.demo import demo_failure, seed_demo_history
 from app.integrations.n8n.client import N8nClient
 from app.models.incident import Base
@@ -42,13 +41,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
+        engine, factory = create_database(config.database_url)
         if ":memory:" in config.database_url:
-            # Isolated test databases do not share connections with Alembic's migration engine.
-            engine, factory = create_database(config.database_url)
+            # Isolated test databases are initialized directly, without Alembic.
             Base.metadata.create_all(engine)
-        else:
-            upgrade_database(config.database_url)
-            engine, factory = create_database(config.database_url)
         app.state.session_factory = factory
         app.state.monitoring = None
         providers = {"mock": MockAlertDeliveryProvider()}
