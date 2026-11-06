@@ -10,14 +10,53 @@ import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
+const POLL_INTERVAL_MS = 30_000;
+
 export default function OverviewPage() {
-  const metrics = useApi(() => api.overviewMetrics());
-  const incidents = useApi(() => api.incidents(50, 0));
+  
+  const metrics = useApi(
+  () => api.overviewMetrics(),
+  "initial",
+  { pollIntervalMs: POLL_INTERVAL_MS },
+);
+  const incidents = useApi(
+  () => api.incidents(50, 0),
+  "initial",
+  { pollIntervalMs: POLL_INTERVAL_MS },
+);
   const incidentRows = incidents.data?.data ?? [];
   const monitoring = metrics.data?.monitoring;
+  
 
   return <>
+    <div className="mb-3 flex items-center justify-end gap-3 text-sm text-slate-400">
+  <span aria-live="polite">
+    Last updated: {metrics.lastUpdated?.toLocaleTimeString() ?? "Not yet"}
+  </span>
+  <button
+    className="button button-secondary"
+    onClick={() => {
+      void metrics.refresh();
+      void incidents.refresh();
+    }}
+  >
+    Refresh
+  </button>
+</div>
     <PageHeader title="Automation health" description="Persisted execution history and deterministic workflow health. FlowMedic observes n8n read-only and never applies a fix." action={<Link className="button button-secondary" href="/incidents">Review incidents</Link>} />
+    <div className="mb-3 flex items-center justify-end gap-3 text-sm text-slate-400">
+  <span aria-live="polite">
+    Last updated: {metrics.lastUpdated?.toLocaleTimeString() ?? "Not yet"}
+  </span>
+  <button 
+  className="button button-secondary"
+    onClick={() => {
+      void metrics.refresh();
+      void incidents.refresh();
+    }}
+  >
+  </button>
+</div>
     {metrics.error && <StatePanel title="Monitoring metrics unavailable" message={metrics.error.message} action={<button className="button button-secondary" onClick={() => void metrics.refresh()}>Try again</button>} />}
     {!metrics.error && <section className="metric-grid" aria-label="Automation health metrics">
       <MetricCard label="Monitoring" value={metrics.loading ? "…" : monitoring?.state ?? "unknown"} detail={monitoring?.enabled ? "Polls every " + monitoring.poll_interval_seconds + "s" : "Disabled until n8n is configured"} tone={monitoring?.state === "degraded" ? "danger" : monitoring?.enabled ? "success" : "muted"} />
@@ -32,12 +71,41 @@ export default function OverviewPage() {
     <section className="overview-secondary mt-4">
       <div className="panel overflow-hidden">
         <div className="panel-header"><div><h2>Recent incidents</h2><p>Persisted incidents from monitoring or explicit sync.</p></div><Link href="/incidents" className="text-sm text-blue-300 hover:text-blue-200">View all</Link></div>
-        {incidents.loading && <StatePanel title="Loading incidents" message="Requesting persisted incidents from FlowMedic." />}
-        {incidents.error && <StatePanel title="Incidents unavailable" message={incidents.error.message} action={<button className="button button-secondary" onClick={() => void incidents.refresh()}>Try again</button>} />}
-        {!incidents.loading && !incidents.error && incidentRows.length === 0 && <StatePanel title="No incidents yet" message="Connect n8n and let monitoring observe failed executions to populate this dashboard." />}
-        {!incidents.loading && !incidents.error && incidentRows.length > 0 && <IncidentTable incidents={incidentRows.slice(0, 6)} compact />}
+        {incidents.loading && !incidents.data && (
+          <StatePanel
+            title="Loading incidents"
+            message="Requesting persisted incidents from FlowMedic."
+          />
+        )}
+
+        {incidents.error && (
+          <StatePanel
+            title="Incidents unavailable"
+            message={incidents.error.message}
+            action={
+              <button
+                className="button button-secondary"
+                onClick={() => void incidents.refresh()}
+              >
+                Try again
+              </button>
+            }
+          />
+        )}
+
+        {!incidents.loading && !incidents.error && incidentRows.length === 0 && (
+          <StatePanel
+            title="No incidents yet"
+            message="Connect n8n and let monitoring observe failed executions to populate this dashboard."
+          />
+        )}
+
+        {incidentRows.length > 0 && !incidents.error && (
+          <IncidentTable incidents={incidentRows.slice(0, 6)} compact />
+        )}
       </div>
       <aside className="panel trend-placeholder"><h2>Monitoring cadence</h2><p className="mt-1 text-sm text-slate-400">Last successful synchronization from persisted monitoring state.</p><div className="trend-grid" aria-label="Monitoring status detail"><span className="trend-line" /></div><small>{formatTimestamp(metrics.data?.last_successful_monitoring_sync_at ?? null)}</small></aside>
     </section>
   </>;
 }
+

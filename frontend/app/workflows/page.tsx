@@ -9,9 +9,13 @@ import { useApi } from "@/lib/use-api";
 function rate(value: number | null): string {
   return value === null ? "Not enough data" : Math.round(value * 100) + "%";
 }
-
+const POLL_INTERVAL_MS = 30_000;
 export default function WorkflowsPage() {
-  const metrics = useApi(() => api.workflowMetrics());
+  const metrics = useApi(
+  () => api.workflowMetrics(),
+  "initial",
+  { pollIntervalMs: POLL_INTERVAL_MS },
+);
   return <><PageHeader title="Workflows" description="Deterministic health is calculated from persisted, sanitized execution history. Unknown means there is not enough classified history yet." />
     <section className="panel overflow-hidden">
       <div className="panel-header"><div><h2>Monitored workflows</h2><p>Latest 20 classified executions per workflow; n8n remains read-only.</p></div></div>
