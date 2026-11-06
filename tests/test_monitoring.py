@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
@@ -230,3 +231,51 @@ def test_migration_preserves_existing_incident_table(tmp_path):
             connection.execute(text("SELECT execution_id FROM incidents")).scalar_one()
             == "old-execution"
         )
+
+
+def test_monitoring_loop_survives_an_iteration_error():
+    async def run():
+        service = _service(FakeN8n([_page()]))
+        service.settings.monitor_poll_interval_seconds = 0.001
+        calls = {"n": 0}
+
+        async def failing_sync():
+            calls["n"] += 1
+            raise RuntimeError("lease acquisition failed")
+
+        service.sync = failing_sync
+        await service.start()
+        await asyncio.sleep(0.05)
+
+        # The poller kept running instead of dying on the first exception.
+        assert calls["n"] >= 1
+        assert service._task is not None
+        assert not service._task.done()
+
+        await service.stop()
+        assert service._task is None
+
+    asyncio.run(run())
+
+
+def test_monitoring_task_can_be_restarted_after_it_ends():
+    async def run():
+        service = _service(FakeN8n([_page(), _page()]))
+        service.settings.monitor_poll_interval_seconds = 0.001
+
+        await service.start()
+        first = service._task
+        assert first is not None
+
+        # Simulate a task that has already finished.
+        first.cancel()
+        with suppress(asyncio.CancelledError):
+            await first
+        service._task = None
+
+        await service.start()
+        assert service._task is not None
+        assert service._task is not first
+        await service.stop()
+
+    asyncio.run(run())
