@@ -29,10 +29,10 @@ export function DiagnosisPanel({
   return (
     <section className="panel p-5 sm:p-6">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
-        <div><h2>AI diagnosis</h2><p className="mt-1 text-sm text-slate-400">Advisory output from the configured diagnosis provider.</p></div>
-        <button className="button" onClick={runDiagnosis} disabled={running}>{running ? "Running diagnosis…" : diagnosis ? "Run again" : "Run AI Diagnosis"}</button>
+        <div><h2>AI diagnosis</h2><p className="muted-text mt-1 text-sm">Advisory output from the configured diagnosis provider.</p></div>
+        <button type="button" className="button" onClick={runDiagnosis} disabled={running}>{running ? "Running diagnosis…" : diagnosis ? "Run again" : "Run AI Diagnosis"}</button>
       </div>
-      {error && <p className="mt-5 rounded-lg border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-100" role="alert">{error}</p>}
+      {error && <p className="alert-inline" role="alert">{error}</p>}
       {diagnosis ? <>
         <dl className="diagnosis-grid mt-4">
           <div><dt>Summary</dt><dd>{diagnosis.summary}</dd></div>
@@ -42,7 +42,7 @@ export function DiagnosisPanel({
           <div className="grid grid-cols-2 gap-4"><div><dt>Confidence</dt><dd>{Math.round(diagnosis.confidence * 100)}%</dd></div><div><dt>Risk level</dt><dd><span className={badgeTone(diagnosis.risk_level)}>{diagnosis.risk_level}</span></dd></div></div>
         </dl>
         <p className="notice">AI-generated diagnosis from <strong>{incident.diagnosis_provider ?? "an unknown provider"}</strong>. Review before changing production workflows. FlowMedic did not apply a fix.</p>
-      </> : <div className="state-panel mt-5 min-h-[170px]"><h3>No diagnosis yet</h3><p>Run the configured provider to generate an advisory diagnosis from sanitized incident data.</p></div>}
+      </> : <div className="state-panel state-panel-inline mt-4"><div><h3>No diagnosis yet</h3><p>Run the configured provider to generate an advisory diagnosis from sanitized incident data.</p></div></div>}
     </section>
   );
 }
