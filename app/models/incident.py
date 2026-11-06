@@ -21,6 +21,7 @@ class Incident(Base):
     execution_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), default="open")
     severity: Mapped[str] = mapped_column(String(20))
+    evidence: Mapped[dict | None] = mapped_column(JSON)
     diagnosis: Mapped[dict | None] = mapped_column(JSON)
     diagnosis_provider: Mapped[str | None] = mapped_column(String(50))
 

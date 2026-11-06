@@ -1,6 +1,31 @@
 export type IncidentStatus = "open" | "diagnosed";
 export type Severity = "medium" | "high";
 export type RiskLevel = "low" | "medium" | "high";
+export type ItemShape = "empty" | "object" | "array" | "scalar" | "mixed";
+
+export interface DiagnosisEvidence {
+  error_description: string | null;
+  http_code: number | null;
+  line_number: number | null;
+  node_type: string | null;
+  item_count: number | null;
+  output_branch_count: number | null;
+  node_run_count: number | null;
+  item_shape: ItemShape | null;
+}
+
+export interface Hypothesis {
+  rank: number;
+  explanation: string;
+  supporting_evidence: string[];
+  contradictory_evidence: string;
+  verification_step: string;
+}
+
+export interface Recommendation {
+  action: string;
+  verification: string;
+}
 
 export interface Diagnosis {
   summary: string;
@@ -8,7 +33,10 @@ export interface Diagnosis {
   affected_component: string;
   recommended_fix: string;
   confidence: number;
+  confidence_basis: string;
   risk_level: RiskLevel;
+  hypotheses: Hypothesis[];
+  recommendations: Recommendation[];
 }
 
 export interface Incident {
@@ -22,6 +50,7 @@ export interface Incident {
   execution_timestamp: string | null;
   severity: Severity;
   status: IncidentStatus;
+  evidence: DiagnosisEvidence | null;
   diagnosis: Diagnosis | null;
   diagnosis_provider: string | null;
 }
