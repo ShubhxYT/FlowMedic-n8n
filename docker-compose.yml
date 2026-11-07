@@ -1,4 +1,14 @@
 services:
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////data/flowmedic.db
+    volumes:
+      - flowmedic-data:/data
+    restart: "no"
+
   api:
     build: .
     ports:
@@ -8,7 +18,11 @@ services:
       DATABASE_URL: sqlite:////data/flowmedic.db
     volumes:
       - flowmedic-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
+
   dashboard:
     build: ./frontend
     ports:
@@ -16,5 +30,6 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
 volumes:
   flowmedic-data:

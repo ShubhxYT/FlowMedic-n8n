@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, inspect, select
 
 from app.core.config import Settings
 from app.core.database import create_database
@@ -115,5 +115,41 @@ def test_workflow_names_are_redacted_before_history_persistence():
             name = session.scalar(select(ExecutionHistory)).workflow_name
             assert "private-key" not in name
             assert "user@example.com" not in name
+    finally:
+        engine.dispose()
+
+
+def test_file_backed_app_startup_does_not_run_alembic_migrations(tmp_path, monkeypatch):
+    async def skip_monitoring_start(self):
+        pass
+
+    async def skip_monitoring_stop(self):
+        pass
+
+    monkeypatch.setattr(
+        "app.main.MonitoringService.start",
+        skip_monitoring_start,
+    )
+    monkeypatch.setattr(
+        "app.main.MonitoringService.stop",
+        skip_monitoring_stop,
+    )
+
+    database_path = tmp_path / "startup.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+
+    settings = Settings(
+        _env_file=None,
+        database_url=database_url,
+        n8n_base_url="https://n8n.example",
+        n8n_api_key="",
+    )
+
+    with TestClient(create_app(settings)):
+        pass
+
+    engine = create_engine(database_url)
+    try:
+        assert not inspect(engine).has_table("alembic_version")
     finally:
         engine.dispose()
