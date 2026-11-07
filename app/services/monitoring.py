@@ -248,7 +248,25 @@ class MonitoringService:
         entries: list[Execution] = []
         for execution in page.data:
             if execution.status is None or is_failed(execution):
-                entries.append(await self.n8n.execution_details(execution.id))
+                try:
+                    entries.append(await self.n8n.execution_details(execution.id))
+                except ServiceError as exc:
+                    if exc.status_code not in {404, 410}:
+                        raise
+                    logger.warning(
+                        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+                        execution.id,
+                        exc.status_code,
+                    )
+                    entries.append(
+                        Execution(
+                            id=execution.id,
+                            workflowId=execution.workflowId,
+                            status=None,
+                            startedAt=execution.startedAt,
+                            stoppedAt=execution.stoppedAt,
+                        )
+                    )
             else:
                 entries.append(execution)
         return entries
