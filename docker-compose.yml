@@ -10,9 +10,16 @@ services:
       - flowmedic-data:/data
     restart: unless-stopped
   dashboard:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: /api/backend
     ports:
       - "127.0.0.1:3000:3000"
+    environment:
+      BACKEND_INTERNAL_URL: http://api:8000
+      FLOWMEDIC_API_KEY: ${FLOWMEDIC_API_KEY:-}
+      TRUST_PROXY_IP: ${TRUST_PROXY_IP:-false}
     depends_on:
       - api
     restart: unless-stopped
