@@ -15,7 +15,7 @@ export function badgeTone(value: Severity | IncidentStatus | RiskLevel): string 
   if (value === "high") return "badge badge-danger";
   if (value === "medium") return "badge badge-warning";
   if (value === "open") return "badge badge-info";
-  if (value === "diagnosed") return "badge badge-success";
+  if (value === "diagnosed" || value === "resolved") return "badge badge-success";
   return "badge badge-muted";
 }
 
