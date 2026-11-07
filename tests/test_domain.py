@@ -157,3 +157,61 @@ def test_real_provider_structured_response_and_safe_input(execution, valid):
     else:
         with pytest.raises(ServiceError, match="invalid output"):
             asyncio.run(run())
+
+
+def _failed(status="error", **error):
+    return Execution(
+        id="1",
+        workflowId="wf-1",
+        status=status,
+        workflowData={"name": "Test workflow"},
+        data={"resultData": {"lastNodeExecuted": "Code node", "error": error}},
+    )
+
+
+def test_code_error_uses_description_as_type():
+    failure = normalize(_failed(description="ReferenceError", message="data1 is not defined"))
+    assert failure.error_type == "ReferenceError"
+
+
+def test_error_type_prefers_name_when_present():
+    failure = normalize(
+        _failed(name="NodeApiError", description="ignored", message="request failed")
+    )
+    assert failure.error_type == "NodeApiError"
+
+
+def test_missing_name_and_description_stays_unknown():
+    failure = normalize(_failed(message="request failed"))
+    assert failure.error_type == "UnknownError"
+
+
+@pytest.mark.parametrize("code", ["401", "403", "429", "500", "503", 500])
+def test_auth_and_upstream_errors_are_high_severity(code):
+    failure = normalize(_failed(name="NodeApiError", message="request failed", httpCode=code))
+    assert failure.severity == "high"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The connection cannot be established, this usually occurs due to an incorrect"
+        " host (domain) value",
+        "The connection was aborted, perhaps the server is offline",
+        "getaddrinfo ENOTFOUND example.invalid",
+    ],
+)
+def test_connection_failures_are_high_severity(message):
+    failure = normalize(_failed(name="NodeApiError", message=message))
+    assert failure.severity == "high"
+
+
+def test_code_errors_stay_medium_severity():
+    failure = normalize(_failed(description="ReferenceError", message="data1 is not defined"))
+    assert failure.severity == "medium"
+
+
+def test_crashed_execution_is_high_severity():
+    failure = normalize(Execution(id="9", workflowId="wf-1", status="crashed"))
+    assert failure.severity == "high"
+    assert failure.error_type == "UnknownError"

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
@@ -34,11 +34,54 @@ class N8nWorkflowPage(BaseModel):
     nextCursor: str | None = Field(default=None)
 
 
-def is_failed(execution: Execution) -> bool:
-    if execution.status is not None:
-        return execution.status in {"error", "crashed"}
-    result = (execution.data or {}).get("resultData")
-    return isinstance(result, dict) and isinstance(result.get("error"), dict)
+def is_failed(
+    execution: Execution, canceled_is_failure: bool = False, waiting_threshold_hours: int = 24
+) -> bool:
+    """
+    Improved status classification for Issue #16:
+    - Treats unknown status with error payload as failed.
+    - Handles explicit error/crashed states.
+    - Adds age-based stuck detection for waiting/running executions.
+    - Supports configurable canceled status.
+    """
+    status = execution.status
+    result = (execution.data or {}).get("resultData", {})
+    has_error_payload = isinstance(result, dict) and isinstance(result.get("error"), dict)
+
+    # 1. If status is None, check error payload
+    if status is None:
+        return has_error_payload
+
+    status_lower = str(status).lower()
+
+    # 2. Explicit error or crashed states
+    if status_lower in {"error", "crashed"}:
+        return True
+
+    # 3. Unknown/other statuses with an error payload count as failure
+    if has_error_payload and status_lower != "success":
+        return True
+
+    # 4. Canceled execution handling (configurable)
+    if status_lower == "canceled":
+        return canceled_is_failure
+
+    # 5. Age-based stuck detection for waiting or running executions
+    if status_lower in {"waiting", "running"}:
+        target_time = execution.startedAt
+        if target_time:
+            try:
+                # Ensure timezone-aware comparison
+                if target_time.tzinfo is None:
+                    target_time = target_time.replace(tzinfo=UTC)
+
+                age_hours = (datetime.now(UTC) - target_time).total_seconds() / 3600
+                if age_hours > waiting_threshold_hours:
+                    return True  # Surfaces as a stuck problem / failure
+            except Exception:
+                pass
+
+    return False
 
 
 class N8nClient:
@@ -99,9 +142,11 @@ class N8nClient:
             params["cursor"] = cursor
         return params
 
-    async def recent_executions(self, limit=50, cursor=None):
+    async def recent_executions(self, limit=50, cursor=None, status=None):
         params = self._params(limit, cursor)
         params["includeData"] = "false"
+        if status:
+            params["status"] = status  # Server-side ?status= filter support added
         return await self._get("/executions", ExecutionPage, params)
 
     async def execution_details(self, execution_id):

@@ -4,10 +4,11 @@ import pytest
 from auth_support import legacy_factory
 from connection_support import provision, snapshot
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, inspect, select, text
 
 from app.core.config import Settings
 from app.core.database import create_database
+from app.core.migrations import upgrade_database
 from app.integrations.n8n.client import Execution
 from app.main import create_app
 from app.models.incident import Base, ExecutionHistory
@@ -130,5 +131,48 @@ def test_workflow_names_are_redacted_before_history_persistence():
             name = session.scalar(select(ExecutionHistory)).workflow_name
             assert "private-key" not in name
             assert "user@example.com" not in name
+    finally:
+        engine.dispose()
+
+
+def test_file_backed_app_startup_does_not_run_alembic_migrations(tmp_path, monkeypatch):
+    async def skip_monitoring_start(self):
+        pass
+
+    async def skip_monitoring_stop(self):
+        pass
+
+    monkeypatch.setattr(
+        "app.main.MonitoringService.start",
+        skip_monitoring_start,
+    )
+    monkeypatch.setattr(
+        "app.main.MonitoringService.stop",
+        skip_monitoring_stop,
+    )
+
+    database_path = tmp_path / "startup.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    # Authentication storage requires the documented migrate-before-start order.
+    upgrade_database(database_url)
+
+    settings = Settings(
+        _env_file=None,
+        database_url=database_url,
+        n8n_base_url="https://n8n.example",
+        n8n_api_key="",
+    )
+
+    with TestClient(create_app(settings)):
+        pass
+
+    engine = create_engine(database_url)
+    try:
+        assert inspect(engine).has_table("alembic_version")
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            assert revision == "0005_gui_connections"
     finally:
         engine.dispose()

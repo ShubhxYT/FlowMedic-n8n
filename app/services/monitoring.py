@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,9 @@ TRANSIENT_CODES = {
     "n8n_rate_limited",
     "n8n_server_error",
 }
+WORKFLOW_NAMES_TTL = 300
+WORKFLOW_NAMES_PAGE_SIZE = 250
+WORKFLOW_NAMES_MAX_PAGES = 4
 
 
 def utc_now() -> datetime:
@@ -62,6 +66,7 @@ class MonitoringService:
         if alerts is not None:
             alerts.write_fence = self._fence
             alerts.transient_secrets = self._secrets()
+        self._names_cache: tuple[float, dict[str, str]] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -326,11 +331,13 @@ class MonitoringService:
             prior_backfill_cursor = checkpoint.backfill_cursor or checkpoint.cursor_value
             session.commit()
 
+        workflow_names = await self._workflow_names()
+
         logger.info("fresh_poll_started instance_id=%s", self.instance_id)
         fresh_page = await self.n8n.recent_executions(self.settings.monitor_page_size, None)
         fresh_entries = await self._hydrate(fresh_page)
         fresh_counts = await self._persist_fresh_page(
-            fresh_entries, fresh_page, prior_backfill_cursor
+            fresh_entries, fresh_page, prior_backfill_cursor, workflow_names
         )
         logger.info(
             "fresh_poll_completed instance_id=%s executions_discovered=%s",
@@ -350,7 +357,7 @@ class MonitoringService:
                 self._heartbeat_lease()
                 page = await self.n8n.recent_executions(self.settings.monitor_page_size, cursor)
                 entries = await self._hydrate(page)
-                counts, cursor = await self._persist_backfill_page(entries, page)
+                counts, cursor = await self._persist_backfill_page(entries, page, workflow_names)
                 discovered += counts[0]
                 history_created += counts[1]
                 incidents_created += counts[2]
@@ -385,16 +392,50 @@ class MonitoringService:
                 entries.append(execution)
         return entries
 
+    async def _workflow_names(self) -> dict[str, str]:
+        """Resolve workflow ids to names, cached for WORKFLOW_NAMES_TTL seconds.
+
+        Failures are non-fatal: monitoring must keep working even if the workflow
+        listing endpoint is unavailable or the test double does not implement it.
+        """
+        now = time.monotonic()
+        if self._names_cache is not None and now - self._names_cache[0] < WORKFLOW_NAMES_TTL:
+            return self._names_cache[1]
+        fetch = getattr(self.n8n, "workflows", None)
+        if fetch is None:
+            return {}
+        names: dict[str, str] = {}
+        cursor = None
+        try:
+            for _ in range(WORKFLOW_NAMES_MAX_PAGES):
+                page = await fetch(limit=WORKFLOW_NAMES_PAGE_SIZE, cursor=cursor)
+                for workflow in page.data:
+                    names[workflow.id] = workflow.name
+                cursor = page.nextCursor
+                if not cursor:
+                    break
+        except Exception:
+            logger.warning("workflow_names_unavailable")
+            return self._names_cache[1] if self._names_cache else {}
+        self._names_cache = (now, names)
+        return names
+
     async def _persist_fresh_page(
         self,
         entries: list[Execution],
         page: ExecutionPage,
         prior_backfill_cursor: str | None,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[int, int, int]:
         new_incidents = []
         with self._session() as session:
             self._fence(session)
-            counts = self._persist_entries(entries, session=session, new_incidents=new_incidents)
+            counts = self._persist_entries(
+                entries,
+                session=session,
+                new_incidents=new_incidents,
+                workflow_names=workflow_names,
+            )
             checkpoint = MonitoringRepository(
                 session, self.workspace_id, self.instance_id
             ).checkpoint(SOURCE)
@@ -424,11 +465,17 @@ class MonitoringService:
         self,
         entries: list[Execution],
         page: ExecutionPage,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[tuple[int, int, int], str | None]:
         new_incidents = []
         with self._session() as session:
             self._fence(session)
-            counts = self._persist_entries(entries, session=session, new_incidents=new_incidents)
+            counts = self._persist_entries(
+                entries,
+                session=session,
+                new_incidents=new_incidents,
+                workflow_names=workflow_names,
+            )
             checkpoint = MonitoringRepository(
                 session, self.workspace_id, self.instance_id
             ).checkpoint(SOURCE)
@@ -446,11 +493,18 @@ class MonitoringService:
             await self._evaluate_alerts(incident_id=incident_id, workflow_id=workflow_id)
         return (len(entries), *counts), page.nextCursor
 
-    def _persist_entries(self, entries, *, session=None, new_incidents=None) -> tuple[int, int]:
+    def _persist_entries(
+        self, entries, *, session=None, new_incidents=None, workflow_names=None
+    ) -> tuple[int, int]:
         if session is None:
             with self._session() as owned:
                 self._fence(owned)
-                counts = self._persist_entries(entries, session=owned, new_incidents=new_incidents)
+                counts = self._persist_entries(
+                    entries,
+                    session=owned,
+                    new_incidents=new_incidents,
+                    workflow_names=workflow_names,
+                )
                 owned.commit()
                 return counts
         history = ExecutionHistoryRepository(session, self.workspace_id, self.instance_id)
@@ -461,7 +515,7 @@ class MonitoringService:
             record, inserted = history.create_once(
                 source=SOURCE,
                 workflow_id=detail.workflowId,
-                workflow_name=sanitize(self._workflow_name(detail), secrets),
+                workflow_name=sanitize(self._workflow_name(detail, workflow_names), secrets),
                 execution_id=detail.id,
                 execution_status=detail.status,
                 recorded_at=utc_now(),
@@ -551,7 +605,7 @@ class MonitoringService:
             now = utc_now()
             checkpoint.last_checked_at = now
             checkpoint.last_error_at = now
-            checkpoint.last_error_summary = error.message[:500]
+            checkpoint.last_error_summary = sanitize(error.message, self._secrets())[:500]
             checkpoint.consecutive_failure_count += 1
             checkpoint.updated_at = now
             session.commit()
@@ -563,6 +617,8 @@ class MonitoringService:
         )
 
     @staticmethod
-    def _workflow_name(execution: Execution) -> str:
+    def _workflow_name(execution: Execution, workflow_names: dict[str, str] | None = None) -> str:
         value = (execution.workflowData or {}).get("name")
+        if not (isinstance(value, str) and value):
+            value = (workflow_names or {}).get(execution.workflowId)
         return value if isinstance(value, str) and value else "Unknown workflow"

@@ -147,7 +147,8 @@ def test_reused_ids_have_separate_history_health_cursors_alerts_and_leases(store
             results = await asyncio.gather(*(service.sync() for service in services))
             assert [result.incidents_created for result in results] == [1, 1]
             assert {s.status().backfill_pending for s in services} == {True}
-            assert len(requests) == 4
+            # Four execution calls plus one cached workflow-name page per instance.
+            assert len(requests) == 6
         histories, incidents = records(store, ExecutionHistory), records(store, Incident)
         assert len(histories) == len(incidents) == 2
         assert {row.execution_id for row in histories} == {"same-execution"}

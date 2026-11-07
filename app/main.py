@@ -17,7 +17,6 @@ from app.core.config import Settings
 from app.core.database import create_database
 from app.core.encryption import ConnectionCipher
 from app.core.errors import ServiceError
-from app.core.migrations import upgrade_database
 from app.core.security import BodySizeLimitMiddleware
 from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
 from app.demo import DEMO_INSTANCE_ID, demo_failure, ensure_demo_instance, seed_demo_history
@@ -62,12 +61,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
+        engine, factory = create_database(config.database_url)
         if ":memory:" in config.database_url:
-            engine, factory = create_database(config.database_url)
+            # Isolated test databases are initialized directly, without Alembic.
             Base.metadata.create_all(engine)
-        else:
-            upgrade_database(config.database_url)
-            engine, factory = create_database(config.database_url)
         ensure_reserved_workspaces(factory)
         cipher = None
         keys = config.connection_encryption_keys.get_secret_value()

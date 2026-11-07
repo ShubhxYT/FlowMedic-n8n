@@ -239,6 +239,8 @@ synthetic execution histories that exercise healthy, degraded, and unhealthy das
 
 ```bash
 DEMO_MODE=true PUBLIC_DEMO_READONLY=true DATABASE_URL=sqlite:///./flowmedic-demo.db \
+  alembic upgrade head
+DEMO_MODE=true PUBLIC_DEMO_READONLY=true DATABASE_URL=sqlite:///./flowmedic-demo.db \
   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
@@ -348,12 +350,15 @@ never trigger, replay, modify, or repair a workflow. Do not commit `.env` or cre
 
 ```bash
 cp .env.example .env
-docker compose up --build
+alembic upgrade head
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Compose binds the API and dashboard to localhost, persists SQLite in a named volume, and runs
-the API image as a non-root user. The API is available at `http://127.0.0.1:8000` and the
-dashboard at `http://127.0.0.1:3000`.
+Compose runs a one-shot `migrate` service before starting the API. The API starts only
+after `alembic upgrade head` completes successfully; if migration fails, Compose does
+not start the API. The migration service and API share the same persistent SQLite volume.
+The API and dashboard are available at `http://127.0.0.1:8000` and
+`http://127.0.0.1:3000`, respectively.
 
 ## Testing and CI
 
@@ -427,6 +432,13 @@ its optional internal `FLOWMEDIC_API_KEY` plus the browser's selected session/CS
 The backend validates user membership independently of that service token. Configure the exact
 dashboard origin in `AUTH_TRUSTED_ORIGINS`; the proxy preserves it for CSRF checks and disables
 shared response caching. API and dashboard access to real data both require a user session.
+
+Database migrations must run as a separate one-shot deployment task before the API
+is started or replaced. Run `alembic upgrade head` using the API image, the production
+environment, and the same persistent `/data` volume. Configure this as a pre-deploy
+or release task in the deployment platform. The API container itself must not run
+migrations on startup: doing so would allow multiple replicas to race against the
+same database. A failed migration must block the API deployment.
 
 Redeploy by hand:
 

@@ -300,3 +300,72 @@ def test_monitoring_task_can_be_restarted_after_it_ends():
         await service.stop()
 
     asyncio.run(run())
+
+def test_successful_executions_use_resolved_workflow_names():
+    from app.integrations.n8n.client import (
+        Execution,
+        ExecutionPage,
+        N8nWorkflow,
+        N8nWorkflowPage,
+    )
+
+    class NamedN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[
+                    Execution(id="1", workflowId="wf-1", status="success"),
+                    Execution(id="2", workflowId="wf-2", status="success"),
+                ],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            raise AssertionError("No detail request expected for successful executions")
+
+        async def workflows(self, limit=50, cursor=None):
+            return N8nWorkflowPage(
+                data=[
+                    N8nWorkflow(id="wf-1", name="Real Workflow One", active=True),
+                    N8nWorkflow(id="wf-2", name="Real Workflow Two", active=False),
+                ],
+                nextCursor=None,
+            )
+
+    async def run():
+        service = _service(NamedN8n())
+        await service.sync()
+        return service
+
+    service = asyncio.run(run())
+    with service.session_factory() as session:
+        names = {
+            row.execution_id: row.workflow_name for row in session.query(ExecutionHistory).all()
+        }
+    assert names == {"1": "Real Workflow One", "2": "Real Workflow Two"}
+
+
+def test_workflow_name_lookup_failure_does_not_break_sync():
+    from app.integrations.n8n.client import Execution, ExecutionPage
+
+    class BrokenNamesN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[Execution(id="1", workflowId="wf-1", status="success")],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            raise AssertionError("No detail request expected")
+
+        async def workflows(self, limit=50, cursor=None):
+            raise ServiceError("n8n_server_error", "listing unavailable", 503)
+
+    async def run():
+        service = _service(BrokenNamesN8n())
+        await service.sync()
+        return service
+
+    service = asyncio.run(run())
+    with service.session_factory() as session:
+        row = session.query(ExecutionHistory).one()
+    assert row.workflow_name == "Unknown workflow"
