@@ -51,10 +51,14 @@ def test_monitoring_updates_running_execution_and_sanitizes_name():
         execution = Execution(
             id="1", workflowId="w", status="running", workflowData={"name": "token=test-secret"}
         )
-        assert service._persist_entries([execution]) == (1, 0)
+        with factory() as session:
+            assert service._persist_entries_into([execution], session)[:2] == (1, 0)
+            session.commit()
         execution.status = "success"
         execution.stoppedAt = datetime(2026, 10, 31, tzinfo=UTC)
-        assert service._persist_entries([execution]) == (0, 0)
+        with factory() as session:
+            assert service._persist_entries_into([execution], session)[:2] == (0, 0)
+            session.commit()
         with factory() as session:
             rows = session.scalars(select(ExecutionHistory)).all()
             assert len(rows) == 1
@@ -64,7 +68,9 @@ def test_monitoring_updates_running_execution_and_sanitizes_name():
         # A stale in-flight poll must not revert a completed execution.
         execution.status = "running"
         execution.stoppedAt = None
-        service._persist_entries([execution])
+        with factory() as session:
+            service._persist_entries_into([execution], session)
+            session.commit()
         with factory() as session:
             assert session.scalar(select(ExecutionHistory)).is_success is True
     finally:
@@ -101,16 +107,19 @@ def test_workflow_names_are_redacted_before_history_persistence():
     Base.metadata.create_all(engine)
     try:
         service = MonitoringService(settings, factory, None)
-        service._persist_entries(
-            [
-                Execution(
-                    id="1",
-                    workflowId="w",
-                    status="success",
-                    workflowData={"name": "Customer user@example.com token=private-key"},
-                )
-            ]
-        )
+        with factory() as session:
+            service._persist_entries_into(
+                [
+                    Execution(
+                        id="1",
+                        workflowId="w",
+                        status="success",
+                        workflowData={"name": "Customer user@example.com token=private-key"},
+                    )
+                ],
+                session,
+            )
+            session.commit()
         with factory() as session:
             name = session.scalar(select(ExecutionHistory)).workflow_name
             assert "private-key" not in name

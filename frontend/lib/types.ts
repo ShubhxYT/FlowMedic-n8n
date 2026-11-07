@@ -71,6 +71,7 @@ export interface MonitoringStatus {
   last_error_summary: string | null;
   consecutive_failure_count: number;
   backfill_pending: boolean;
+  pending_fresh_cursor_count: number;
   backfill_completed_at: string | null;
   backfill_state: BackfillState;
   lease_state: LeaseState;

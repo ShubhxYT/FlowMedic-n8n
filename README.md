@@ -199,7 +199,8 @@ backend address. It is browser-visible configuration and must not contain a toke
 | `CORS_ALLOW_ORIGINS` | local dashboard origins | Comma-separated frontend origins permitted by FastAPI |
 | `MONITOR_POLL_INTERVAL_SECONDS` | `60` | Read-only polling cadence; 10–3600 seconds |
 | `MONITOR_PAGE_SIZE` | `50` | n8n execution page size; 1–100 |
-| `MONITOR_BACKFILL_PAGES_PER_CYCLE` | `1` | Bounded older-page work after the fresh poll; 0 disables backfill |
+| `MONITOR_OVERFLOW_PAGES_PER_CYCLE` | `10` | Additional fresh pages followed per cycle when the newest page overflows; 1–20 |
+| `MONITOR_BACKFILL_PAGES_PER_CYCLE` | `1` | Bounded older-page work after the fresh poll; 0 disables only the historical sweep (fresh overflow recovery continues, and deferred ranges are logged) |
 | `MONITOR_LEASE_SECONDS` | `120` | SQLite lease expiry for cross-process polling ownership |
 | `MONITOR_MAX_RETRIES` | `3` | Maximum transient retry attempts per poll |
 | `MONITOR_RETRY_BASE_SECONDS` | `2` | Initial exponential-backoff delay |

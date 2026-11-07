@@ -45,13 +45,36 @@ class FreshThenBackfillN8n:
         raise AssertionError(f"details are not needed for {execution_id}")
 
 
-def service_with_database(tmp_path, n8n):
+class PageChainN8n:
+    """Deterministic cursor -> page map for overflow scenarios."""
+
+    def __init__(self, pages: dict[str | None, tuple[list[tuple[str, str]], str | None]]):
+        self.pages = pages
+        self.calls: list[str | None] = []
+
+    async def recent_executions(self, limit, cursor):
+        from app.integrations.n8n.client import Execution, ExecutionPage
+
+        self.calls.append(cursor)
+        entries, next_cursor = self.pages[cursor]
+        data = [
+            Execution(id=execution_id, workflowId="workflow", status=status)
+            for execution_id, status in entries
+        ]
+        return ExecutionPage(data=data, nextCursor=next_cursor)
+
+    async def execution_details(self, execution_id):
+        raise AssertionError(f"details are not needed for {execution_id}")
+
+
+def service_with_database(tmp_path, n8n, overflow_pages=10):
     settings = Settings(
         _env_file=None,
         database_url=f"sqlite:///{tmp_path / 'monitoring.db'}",
         n8n_base_url="https://n8n.example",
         n8n_api_key="test-key",
         monitor_backfill_pages_per_cycle=1,
+        monitor_overflow_pages_per_cycle=overflow_pages,
         retention_cleanup_interval_seconds=60,
     )
     engine, factory = create_database(settings.database_url)
@@ -60,23 +83,38 @@ def service_with_database(tmp_path, n8n):
 
 
 def test_fresh_poll_finds_new_execution_while_backfill_is_pending(tmp_path):
+    """Overflow beyond the drain budget is durably queued and resumed first."""
+    pages = {
+        None: ([("fresh-1", "success")], "p2"),
+        "p2": ([("fresh-2", "success")], "p3"),
+        "p3": ([("fresh-3", "success")], None),
+    }
+
     async def run():
-        n8n = FreshThenBackfillN8n()
-        service, factory = service_with_database(tmp_path, n8n)
+        n8n = PageChainN8n(pages)
+        service, factory = service_with_database(tmp_path, n8n, overflow_pages=1)
 
         first = await service.sync()
-        assert first.executions_discovered == 1
-        assert n8n.calls == [None]
-        assert service.status().backfill_pending is True
+        assert first.executions_discovered == 2
+        assert n8n.calls == [None, "p2"]
+        with factory() as session:
+            checkpoint = MonitoringRepository(session).checkpoint("n8n", "default")
+            assert checkpoint.pending_cursors == ["p3"]
+            assert checkpoint.backfill_cursor is None
 
         second = await service.sync()
-        assert second.executions_discovered == 2
-        assert n8n.calls == [None, None, "older-1"]
-        assert service.status().backfill_pending is False
+        assert second.executions_discovered == 1
+        assert n8n.calls == [None, "p2", "p3", None, "p2"]
+        with factory() as session:
+            checkpoint = MonitoringRepository(session).checkpoint("n8n", "default")
+            assert checkpoint.pending_cursors == []
+        assert service.status().backfill_pending is True
 
+        third = await service.sync()
+        assert third.next_cursor is None
         with factory() as session:
             history_ids = set(session.scalars(select(ExecutionHistory.execution_id)))
-        assert history_ids == {"fresh-1", "fresh-2", "older-1"}
+        assert history_ids == {"fresh-1", "fresh-2", "fresh-3"}
 
     asyncio.run(run())
 
@@ -169,7 +207,7 @@ def test_retention_removes_only_old_history_and_health_uses_retained_window(tmp_
             history = list(session.scalars(select(ExecutionHistory)))
             incidents = list(session.scalars(select(Incident)))
             health = build_workflow_health(history, incidents)[0]
-        assert {item.execution_id for item in history} == {"fresh-1"}
+        assert {item.execution_id for item in history} == {"fresh-1", "older-1"}
         assert len(incidents) == 1
         assert health.health == "degraded"
 

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     monitor_poll_interval_seconds: float = Field(default=60, ge=10, le=3600)
     monitor_page_size: int = Field(default=50, ge=1, le=100)
     monitor_backfill_pages_per_cycle: int = Field(default=1, ge=0, le=5)
+    monitor_overflow_pages_per_cycle: int = Field(default=10, ge=1, le=20)
     monitor_lease_seconds: float = Field(default=120, ge=30, le=3600)
     monitor_max_retries: int = Field(default=3, ge=0, le=5)
     monitor_retry_base_seconds: float = Field(default=2, gt=0, le=60)
