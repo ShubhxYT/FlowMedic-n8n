@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = "gpt-4.1-mini"
     flowmedic_api_key: SecretStr = SecretStr("")
+    auth_registration_enabled: bool = False
+    auth_allow_insecure_cookies: bool = False
+    auth_trusted_origins: str = "https://localhost:3000"
+    auth_session_seconds: int = Field(default=43200, ge=300, le=604800)
+    auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
+    api_docs_enabled: bool = False
     demo_mode: bool = False
     public_demo_readonly: bool = False
     cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -63,6 +69,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def key_requires_url(self):
+        origins = [value.strip() for value in self.auth_trusted_origins.split(",")]
+        for value in origins:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path
+                or value.endswith("/")
+            ):
+                raise ValueError("AUTH_TRUSTED_ORIGINS must contain exact HTTP(S) origins")
+            if parsed.scheme != "https" and not self.auth_allow_insecure_cookies:
+                raise ValueError("HTTP auth origins require explicit insecure development cookies")
+            if self.auth_allow_insecure_cookies and parsed.hostname not in {
+                "localhost",
+                "127.0.0.1",
+                "::1",
+            }:
+                raise ValueError("Insecure cookies are permitted only on local development origins")
         if self.n8n_api_key.get_secret_value() and not self.n8n_base_url:
             raise ValueError("N8N_BASE_URL is required when N8N_API_KEY is set")
         if self.public_demo_readonly and not self.demo_mode:

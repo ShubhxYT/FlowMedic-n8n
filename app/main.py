@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException
 
 from app import models  # noqa: F401
 from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
+from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.core.config import Settings
 from app.core.database import create_database
@@ -29,7 +30,11 @@ from app.services.monitoring import MonitoringService
 
 
 def error_response(code, message, status_code):
-    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status_code)
+    return JSONResponse(
+        {"error": {"code": code, "message": message}},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app(
@@ -100,7 +105,14 @@ def create_app(
             app.state.alerts.close()
             engine.dispose()
 
-    app = FastAPI(title="FlowMedic AI", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="FlowMedic AI",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if config.api_docs_enabled else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if config.api_docs_enabled else None,
+    )
     app.state.settings = config
 
     @app.middleware("http")
@@ -113,12 +125,17 @@ def create_app(
     @app.middleware("http")
     async def authentication(request: Request, call_next):
         key = config.flowmedic_api_key.get_secret_value()
-        if key and request.url.path != "/health":
+        request.state.service_authenticated = False
+        if key and request.url.path != "/health" and request.method != "OPTIONS":
             expected = ("Bearer " + key).encode()
             supplied = request.headers.get("Authorization", "").encode()
             if not secrets.compare_digest(supplied, expected):
                 return error_response("unauthorized", "A valid bearer token is required", 401)
-        return await call_next(request)
+            request.state.service_authenticated = True
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     @app.exception_handler(ServiceError)
     async def service_error(request, exc):
@@ -145,10 +162,11 @@ def create_app(
     def index() -> dict[str, str | None]:
         return {
             "service": "FlowMedic AI",
-            "docs": "/docs",
+            "docs": "/docs" if config.api_docs_enabled else None,
             "demo": "/api/v1/demo" if config.demo_mode else None,
         }
 
+    app.include_router(auth_router)
     app.include_router(
         router,
         responses={
@@ -161,9 +179,9 @@ def create_app(
         allow_origins=[
             origin.strip() for origin in config.cors_allow_origins.split(",") if origin.strip()
         ],
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
     return app
 
