@@ -45,8 +45,10 @@ targets. Access logging is disabled in the documented startup command and image.
 
 The service is intended for local or trusted-network MVP use. Set `FLOWMEDIC_API_KEY`
 and deploy behind a TLS reverse proxy before network exposure. There is no multi-user
-authorization, rate limiting, secret manager, or audit trail yet. Diagnosing an incident
-again replaces its last diagnosis and can incur another provider charge.
+authorization, secret manager, or audit trail yet. Mutating routes return 503 until
+`FLOWMEDIC_API_KEY` is set (`ALLOW_UNAUTHENTICATED_MUTATIONS=true` is a local-only opt-out).
+`diagnose` is rate limited per caller in memory (per process). Diagnosing an incident
+again requires `?force=true`, replaces its last diagnosis and can incur another provider charge.
 
 ## Public demo mode
 
