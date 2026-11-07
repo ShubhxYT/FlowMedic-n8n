@@ -124,7 +124,11 @@ class N8nClient:
                 raise ServiceError(
                     "n8n_server_error", "n8n service is temporarily unavailable", 503
                 ) from None
-            raise ServiceError("n8n_http_error", "n8n returned an unsuccessful response") from None
+            raise ServiceError(
+                "n8n_http_error",
+                "n8n returned an unsuccessful response",
+                exc.response.status_code,
+            ) from None
         except (ValueError, ValidationError):
             raise ServiceError("n8n_malformed", "n8n returned an invalid response") from None
 

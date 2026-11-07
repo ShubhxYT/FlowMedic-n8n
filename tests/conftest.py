@@ -80,3 +80,16 @@ def mock_example_dns(monkeypatch):
         return resolve(host, port, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def isolate_external_environment(monkeypatch):
+    for name in (
+        "N8N_BASE_URL",
+        "N8N_API_KEY",
+        "AI_API_KEY",
+        "OPENAI_API_KEY",
+        "DEMO_MODE",
+        "PUBLIC_DEMO_READONLY",
+    ):
+        monkeypatch.delenv(name, raising=False)

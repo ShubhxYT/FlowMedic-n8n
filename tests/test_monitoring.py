@@ -369,3 +369,64 @@ def test_workflow_name_lookup_failure_does_not_break_sync():
     with service.session_factory() as session:
         row = session.query(ExecutionHistory).one()
     assert row.workflow_name == "Unknown workflow"
+
+
+def test_missing_execution_detail_does_not_abort_mixed_fresh_page(monkeypatch):
+    from unittest.mock import Mock
+
+    from sqlalchemy import select
+
+    from app.integrations.n8n.client import Execution, ExecutionPage
+    from app.models.incident import Incident
+
+    class MixedPageN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[
+                    Execution(id="gone", workflowId="wf-1", status="error"),
+                    Execution(id="failed", workflowId="wf-1", status="error"),
+                    Execution(id="healthy", workflowId="wf-1", status="success"),
+                ],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            if execution_id == "gone":
+                raise ServiceError("n8n_http_error", "n8n returned an unsuccessful response", 404)
+            return Execution(
+                id=execution_id,
+                workflowId="wf-1",
+                status="error",
+            )
+
+    async def run():
+        service = _service(MixedPageN8n())
+        result = await service.sync()
+        assert result.status == "completed"
+        assert result.executions_discovered == 3
+        assert result.history_records_created == 3
+        assert result.incidents_created == 1
+
+        with service.session_factory() as session:
+            history = {
+                item.execution_id: item for item in session.scalars(select(ExecutionHistory)).all()
+            }
+            incidents = session.scalars(select(Incident)).all()
+
+        assert set(history) == {"gone", "failed", "healthy"}
+        assert history["gone"].execution_status is None
+        assert history["gone"].is_success is None
+        assert history["gone"].incident_id is None
+        assert history["healthy"].execution_status == "success"
+        assert len(incidents) == 1
+        assert incidents[0].execution_id == "failed"
+
+    warning = Mock()
+    monkeypatch.setattr("app.services.monitoring.logger.warning", warning)
+    asyncio.run(run())
+    warning.assert_any_call(
+        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+        "gone",
+        404,
+    )
+    assert all("payload" not in str(call).lower() for call in warning.call_args_list)
