@@ -1,5 +1,6 @@
 "use client";
 
+import { InstanceSelector } from "@/components/instance-selector";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
@@ -43,6 +44,7 @@ export function DashboardShell({ children }: Readonly<{ children: React.ReactNod
             </select></label>
             <button className="button button-secondary" onClick={() => void accountAction(api.logout, "/login")}>Log out</button>
           </>}
+          <InstanceSelector />
           <SystemStatus />
           {accountError && <span role="alert">{accountError}</span>}
         </div>

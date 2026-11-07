@@ -7,7 +7,12 @@ import type {
   Incident,
   IncidentPage,
   N8nConnectionResponse,
-  MonitoringStatus,
+  MonitoringStatusPage,
+  ConnectionCollection,
+  ConnectionInput,
+  ConnectionPage,
+  ConnectionTestResult,
+  ManagedConnection,
   OverviewMetrics,
   SystemStatus,
   WorkflowHealthPage,
@@ -80,21 +85,64 @@ export const api = {
   removeMember: (id: string) => request(`/api/v1/auth/members/${id}`, { method: "DELETE" }),
   health: () => request<HealthResponse>("/health"),
   systemStatus: () => request<SystemStatus>("/api/v1/system/status"),
-  monitoringStatus: () => request<MonitoringStatus>("/api/v1/monitoring/status"),
-  monitoringSync: () => request("/api/v1/monitoring/sync", { method: "POST" }),
+  monitoringStatus: (id: string | null = null) => request<MonitoringStatusPage>(scopedPath("/api/v1/monitoring/status", id)),
+  monitoringSync: (id: string) => request(scopedPath("/api/v1/monitoring/sync", id), { method: "POST" }),
   alertRules: () => request<AlertRulePage>("/api/v1/alerts/rules"),
-  alertEvents: (limit = 50, offset = 0) =>
-    request<AlertEventPage>(`/api/v1/alerts/events?limit=${limit}&offset=${offset}`),
-  overviewMetrics: () => request<OverviewMetrics>("/api/v1/metrics/overview"),
-  workflowMetrics: () => request<WorkflowHealthPage>("/api/v1/metrics/workflows"),
-  n8nStatus: () => request<N8nConnectionResponse>("/api/v1/n8n/status"),
-  workflows: (limit = 50, cursor?: string) => {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (cursor) params.set("cursor", cursor);
-    return request<WorkflowPage>(`/api/v1/workflows?${params}`);
-  },
-  incidents: (limit = 50, offset = 0) =>
-    request<IncidentPage>(`/api/v1/incidents?limit=${limit}&offset=${offset}`),
+  alertEvents: (id: string | null = null, limit = 50, offset = 0) =>
+    request<AlertEventPage>(scopedPath("/api/v1/alerts/events", id, {limit: String(limit), offset: String(offset)})),
+  overviewMetrics: (id: string | null = null) => request<OverviewMetrics>(scopedPath("/api/v1/metrics/overview", id)),
+  workflowMetrics: (id: string | null = null) => request<WorkflowHealthPage>(scopedPath("/api/v1/metrics/workflows", id)),
+  n8nStatus: (id: string) => request<N8nConnectionResponse>(scopedPath("/api/v1/n8n/status", id)),
+  workflows: (id: string, limit = 50, cursor?: string) =>
+    request<WorkflowPage>(scopedPath("/api/v1/workflows", id, {limit: String(limit), ...(cursor ? {cursor} : {})})),
+  incidents: (id: string | null = null, limit = 50, offset = 0) =>
+    request<IncidentPage>(scopedPath("/api/v1/incidents", id, {limit: String(limit), offset: String(offset)})),
   incident: (id: string) => request<Incident>(`/api/v1/incidents/${id}`),
   diagnose: (id: string) => request<Incident>(`/api/v1/incidents/${id}/diagnose`, { method: "POST" }),
+};
+
+function scopedPath(path: string, instanceId: string | null, extra?: Record<string, string>): string {
+  const params = new URLSearchParams(extra);
+  if (instanceId) params.set("instance_id", instanceId);
+  const suffix = params.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
+export const connectionApi = {
+  list: (collection: ConnectionCollection) =>
+    request<ConnectionPage>(`/api/v1/settings/${collection}`),
+  save: (collection: ConnectionCollection, values: ConnectionInput, saved?: ManagedConnection) =>
+    request<ManagedConnection>(
+      `/api/v1/settings/${collection}${saved ? `/${encodeURIComponent(saved.id)}` : ""}`,
+      {
+        ...jsonBody(saved ? { ...values, expected_revision: saved.revision } : values),
+        method: saved ? "PATCH" : "POST",
+      },
+    ),
+  remove: (collection: ConnectionCollection, saved: ManagedConnection) =>
+    request<{ deleted: boolean }>(`/api/v1/settings/${collection}/${encodeURIComponent(saved.id)}`, {
+      method: "DELETE",
+      headers: { "If-Match": `"${saved.revision}"` },
+    }),
+  test: (
+    collection: ConnectionCollection,
+    candidate: ConnectionInput,
+    mode: "access" | "structured_output",
+    acknowledgeUsageCost: boolean,
+    saved?: ManagedConnection,
+  ) => request<ConnectionTestResult>(
+    `/api/v1/settings/${collection}${saved ? `/${encodeURIComponent(saved.id)}` : ""}/test`,
+    {
+      ...jsonBody(saved ? {
+        expected_revision: saved.revision,
+        changes: candidate,
+        mode,
+        acknowledge_usage_cost: acknowledgeUsageCost,
+      } : {
+        candidate,
+        mode,
+        acknowledge_usage_cost: acknowledgeUsageCost,
+      }),
+    },
+  ),
 };

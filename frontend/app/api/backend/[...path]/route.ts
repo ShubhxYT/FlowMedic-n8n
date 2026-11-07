@@ -16,7 +16,7 @@ async function forward(request: NextRequest, context: Context): Promise<NextResp
   const target = new URL(`${base}/${path.map(encodeURIComponent).join("/")}`);
   target.search = request.nextUrl.search;
   const headers = new Headers({ Accept: "application/json" });
-  for (const name of ["content-type", "origin", "x-csrf-token"]) {
+  for (const name of ["content-type", "origin", "x-csrf-token", "if-match"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }

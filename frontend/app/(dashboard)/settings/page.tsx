@@ -1,153 +1,59 @@
 "use client";
 
+import { useState } from "react";
 import { WorkspaceMembers } from "@/components/workspace-members";
+import { ConnectionSettings } from "@/components/connection-settings";
+import { useConnectionScope } from "@/components/connection-scope";
 import { PageHeader } from "@/components/page-header";
 import { StatePanel } from "@/components/state-panel";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
-function ownershipLabel(
-  enabled: boolean | undefined,
-  leaseState: "active" | "standby" | "unclaimed" | undefined,
-): string {
-  if (!enabled) return "Disabled";
-  if (leaseState === "active") return "Active";
-  if (leaseState === "standby") return "Standby";
-  return "Idle";
+export default function SettingsPage() {
+  const scope = useConnectionScope();
+  const revisionKey = scope.instances.map(item => `${item.id}:${item.revision}`).join(",");
+  const key = `${scope.workspaceId}:${scope.instanceId ?? "all"}:${revisionKey}`;
+  return <>
+    <PageHeader title="Settings & connections" description="Connect your n8n instances and choose an AI provider for this workspace." />
+    <div className="settings-grid connection-grid"><ConnectionSettings /></div>
+    <SettingsStatus key={key} queryKey={key} />
+    <WorkspaceMembers />
+  </>;
 }
 
-export default function SettingsPage() {
-  const system = useApi(() => api.systemStatus());
-  const health = useApi(() => api.health());
-  const n8n = useApi(() => api.n8nStatus());
-  const monitoring = useApi(() => api.monitoringStatus());
-  const backendError = system.error ?? health.error ?? monitoring.error;
-
-  if (backendError) {
-    return (
-      <>
-        <PageHeader
-          title="Settings & connection"
-          description="Safe connection and monitoring state. Secret values are never shown."
-        />
-        <StatePanel
-          title="Backend unavailable"
-          message={backendError.message}
-          action={
-            <button
-              className="button button-secondary"
-              onClick={() => {
-                void system.refresh();
-                void health.refresh();
-                void n8n.refresh();
-                void monitoring.refresh();
-              }}
-            >
-              Try again
-            </button>
-          }
-        />
-      </>
-    );
+function SettingsStatus({queryKey}: {queryKey: string}) {
+  const scope = useConnectionScope();
+  const health = useApi(api.health, `${queryKey}:health`);
+  const system = useApi(api.systemStatus, `${queryKey}:system`);
+  const monitoring = useApi(() => api.monitoringStatus(scope.instanceId), `${queryKey}:monitoring`);
+  const [pending, setPending] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const selected = scope.instances.find(item => item.id === scope.instanceId);
+  const error = health.error ?? system.error ?? monitoring.error;
+  async function sync() {
+    if (!selected?.enabled || pending) return;
+    setPending(true);
+    setFeedback("");
+    try {
+      await api.monitoringSync(selected.id);
+      await monitoring.refresh();
+      setFeedback("Sync finished. Monitoring status has been refreshed.");
+    } catch (reason) {
+      setFeedback(reason instanceof ApiError ? reason.message : "Sync could not be completed.");
+    } finally { setPending(false); }
   }
-
-  return (
-    <>
-      <PageHeader
-        title="Settings & connection"
-        description="Operational state provided by the backend. API keys and connection secrets are never exposed."
-      />
-      <WorkspaceMembers />
-      {system.loading || health.loading || monitoring.loading ? (
-        <StatePanel
-          title="Loading backend status"
-          message="Checking FlowMedic configuration without reading secrets."
-        />
-      ) : (
-        <section className="settings-grid">
-          <article className="panel setting-card">
-            <h2>Backend health</h2>
-            <p>Local process liveness from the health endpoint.</p>
-            <strong className="text-emerald-300">
-              {health.data?.status === "ok" ? "Operational" : "Unknown"}
-            </strong>
-            <small>GET /health</small>
-          </article>
-          <article className="panel setting-card">
-            <h2>n8n configuration</h2>
-            <p>Reports configuration only; no credentials are returned.</p>
-            <strong>{system.data?.n8n_configured ? "Configured" : "Not configured"}</strong>
-            <small>
-              {n8n.loading
-                ? "Checking connectivity…"
-                : n8n.data?.connected
-                  ? "Connected"
-                  : n8n.error
-                    ? "Connection not available"
-                    : "Not available yet"}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>Monitoring ownership</h2>
-            <p>A database-backed lease prevents concurrent polling across API processes.</p>
-            <strong>{ownershipLabel(monitoring.data?.enabled, monitoring.data?.lease_state)}</strong>
-            <small>
-              {monitoring.data?.enabled
-                ? "Poll interval: " + monitoring.data.poll_interval_seconds + " seconds"
-                : "No n8n credentials configured"}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>Fresh polling</h2>
-            <p>Every cycle checks the newest n8n page before any historical backfill.</p>
-            <strong>{formatTimestamp(monitoring.data?.last_fresh_poll_at ?? null)}</strong>
-            <small>
-              {monitoring.data?.backfill_state === "pending"
-                ? "Historical backfill is pending"
-                : monitoring.data?.backfill_state === "disabled"
-                  ? "Historical backfill is disabled"
-                  : "Historical backfill is complete"}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>History retention</h2>
-            <p>Health metrics use retained execution history. Incidents are kept separately.</p>
-            <strong>{monitoring.data?.retention_days ?? "Unknown"} days</strong>
-            <small>
-              Last cleanup: {formatTimestamp(monitoring.data?.last_retention_at ?? null)}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>Last successful sync</h2>
-            <p>Persisted monitoring checkpoint; no execution payload is stored here.</p>
-            <strong>{formatTimestamp(monitoring.data?.last_successful_sync_at ?? null)}</strong>
-            <small>
-              {monitoring.data?.consecutive_failure_count
-                ? monitoring.data.consecutive_failure_count + " consecutive monitoring failures"
-                : "No active monitoring failure"}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>AI diagnosis provider</h2>
-            <p>Diagnosis remains advisory and never changes an automation workflow.</p>
-            <strong>
-              {system.data?.ai_mode === "configured" ? "Configured provider" : "Deterministic mock mode"}
-            </strong>
-            <small>
-              {system.data?.ai_mode === "configured"
-                ? "Live provider key is present"
-                : "No AI key is configured"}
-            </small>
-          </article>
-          <article className="panel setting-card">
-            <h2>Database</h2>
-            <p>Database engine only. Connection strings are not shown.</p>
-            <strong>{system.data?.database_engine ?? "Unknown"}</strong>
-            <small>Managed by the FastAPI service</small>
-          </article>
-        </section>
-      )}
-    </>
-  );
+  return <section className="settings-status" aria-label="Operational status">
+    <div className="panel-header"><div><h2>Operational status</h2><p>{selected ? `Monitoring ${selected.name}` : "Monitoring across this workspace"}</p></div>
+      {scope.role === "admin" && selected && <button className="button button-secondary" disabled={!selected.enabled || pending} onClick={() => void sync()}>{pending ? "Syncing…" : "Sync now"}</button>}
+    </div>
+    {feedback && <p role="status" className="notice">{feedback}</p>}
+    {error && <StatePanel title="Status unavailable" message={error.message} action={<button className="button button-secondary" onClick={() => {void health.refresh(); void system.refresh(); void monitoring.refresh();}}>Try again</button>} />}
+    {health.loading || system.loading || monitoring.loading ? <p role="status">Loading operational status…</p> : <div className="settings-grid">
+      <article className="panel setting-card"><h2>Backend health</h2><strong>{health.data?.status === "ok" ? "Operational" : "Unavailable"}</strong><p>{system.data?.database_engine ?? "Unknown"} database · {system.data?.enabled_n8n_count ?? 0} enabled n8n instances</p></article>
+      <article className="panel setting-card"><h2>History retention</h2><strong>{system.data?.retention_days ?? "Unavailable"} days</strong><p>Execution history is retained separately from incidents.</p></article>
+      {monitoring.data?.items.map(item => <article key={item.instance_id} className="panel setting-card"><h2>{item.instance_name ?? item.instance_id}</h2><strong>{item.configuration_state === "configuration_error" ? "Configuration needs attention" : item.state}</strong><p>{item.enabled ? `Checks every ${item.poll_interval_seconds}s · Lease ${item.lease_state}` : "Disabled — enable this connection when you are ready."}</p><p>Last fresh poll: {formatTimestamp(item.last_fresh_poll_at)}</p><p>Last successful sync: {formatTimestamp(item.last_successful_sync_at)}</p><p>{item.backfill_pending ? "Historical backfill pending" : "No pending backfill"} · Last cleanup: {formatTimestamp(item.last_retention_at)}</p>{item.last_error_summary && <p role="alert">{item.last_error_summary}</p>}</article>)}
+      {monitoring.data?.items.length === 0 && <article className="panel setting-card"><h2>Monitoring</h2><p>Add an n8n instance above to begin.</p></article>}
+    </div>}
+  </section>;
 }

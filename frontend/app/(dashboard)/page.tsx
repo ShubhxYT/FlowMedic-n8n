@@ -1,5 +1,7 @@
 "use client";
 
+import { useConnectionScope } from "@/components/connection-scope";
+
 import Link from "next/link";
 
 import { IncidentTable } from "@/components/incident-table";
@@ -11,8 +13,10 @@ import { formatTimestamp } from "@/lib/format";
 import { useApi } from "@/lib/use-api";
 
 export default function OverviewPage() {
-  const metrics = useApi(() => api.overviewMetrics());
-  const incidents = useApi(() => api.incidents(50, 0));
+  const {workspaceId, instanceId} = useConnectionScope();
+  const scopeKey = `${workspaceId}:${instanceId ?? "all"}`;
+  const metrics = useApi(() => api.overviewMetrics(instanceId), `${scopeKey}:overview`);
+  const incidents = useApi(() => api.incidents(instanceId, 50, 0), `${scopeKey}:incidents`);
   const incidentRows = incidents.data?.data ?? [];
   const monitoring = metrics.data?.monitoring;
 

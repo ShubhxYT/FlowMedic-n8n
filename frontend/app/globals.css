@@ -51,3 +51,33 @@ h2 { font-size: 1rem; font-weight: 650; letter-spacing: -.015em; }
 .settings-grid { display: grid; gap: 15px; }.setting-card { padding: 19px; }.setting-card p { margin-top: 7px; color: var(--muted); font-size: .8rem; line-height: 1.5; }.setting-card strong { display: block; margin-top: 16px; color: #e7f0fc; font-size: 1rem; }.setting-card small { color: #7e91a9; }
 @media (min-width: 640px) { .dashboard-main { padding: 96px 30px 44px; }.metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }.detail-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; } }
 @media (min-width: 1024px) { .sidebar { transform: none; }.topbar { left: 244px; }.dashboard-main { margin-left: 244px; padding: 104px 40px 48px; }.metric-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }.overview-secondary { grid-template-columns: minmax(0, 1.65fr) minmax(280px, .8fr); }.detail-grid { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }.settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.connection-grid { margin-bottom: 28px; align-items: start; }
+.connection-section > button { margin: 16px 8px 8px 0; }
+.connection-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.connection-list li { border-top: 1px solid var(--border); padding: 2px 0 18px; overflow-wrap: anywhere; }
+.connection-list li > button { margin: 12px 7px 0 0; }
+.connection-list strong { display: inline-block; margin-right: 8px; }
+.connection-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 28px; border: 1px solid #355274; border-radius: 14px; color: #e7edf7; background: var(--surface); box-shadow: 0 24px 100px #0009; }
+.connection-dialog::backdrop { background: #020812bb; backdrop-filter: blur(4px); }
+.connection-dialog h2 { font-size: 1.3rem; margin-bottom: 16px; }
+.connection-dialog > button { margin: 16px 8px 0 0; }
+.connection-form fieldset { display: flex; flex-direction: column; gap: 10px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.connection-form legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.connection-form input:not([type="checkbox"]), .connection-form select { width: 100%; min-height: 40px; border: 1px solid #355274; border-radius: 7px; padding: 8px 10px; background: #091626; color: #e7edf7; }
+.connection-form label { font-size: .85rem; margin-top: 7px; line-height: 1.6; }
+.connection-form p, .connection-dialog p { font-size: .85rem; color: var(--muted); line-height: 1.5; }
+.connection-form input[type="checkbox"] { accent-color: var(--blue); margin-right: 8px; }
+.connection-form button { margin-top: 5px; }
+.connection-dialog [role="alert"], .connection-section [role="alert"] { color: var(--danger); }
+.connection-dialog [role="status"], .connection-section [role="status"] { color: var(--green); }
+.settings-status { margin-bottom: 28px; }
+.settings-status > .panel-header { padding-left: 0; border: 0; }
+.scope-selector { display: flex; align-items: center; gap: 8px; font-size: .8rem; }
+.scope-selector select { min-width: 130px; max-width: 210px; }
+.topbar { height: auto; min-height: 64px; padding-top: 8px; padding-bottom: 8px; }
+@media (max-width: 639px) { .topbar { position: relative; padding: 12px; } .dashboard-main { padding-top: 28px; } .scope-selector { width: 100%; } }
+/* Keep workspace and instance controls in normal flow as the header wraps. */
+.topbar { position: sticky; inset: auto; top: 0; }
+.dashboard-main { padding-top: 36px; }
+@media (min-width: 1024px) { .topbar { margin-left: 244px; } }
