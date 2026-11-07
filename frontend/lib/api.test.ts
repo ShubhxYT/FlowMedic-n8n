@@ -10,7 +10,7 @@ describe("FlowMedic API client", () => {
   it("returns typed incident data", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
     await expect(api.incidents()).resolves.toEqual({ data: [] });
-    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8000/api/v1/incidents?limit=50&offset=0", expect.objectContaining({ headers: { Accept: "application/json" } }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/backend/api/v1/incidents?limit=50&offset=0", expect.objectContaining({ headers: { Accept: "application/json" } }));
   });
 
   it("returns the backend's safe error message", async () => {
@@ -29,7 +29,7 @@ describe("FlowMedic API client", () => {
     );
     await expect(api.overviewMetrics()).resolves.toEqual(body);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/v1/metrics/overview",
+      "/api/backend/api/v1/metrics/overview",
       expect.anything(),
     );
   });
@@ -40,7 +40,7 @@ describe("FlowMedic API client", () => {
     );
     await expect(api.alertEvents()).resolves.toEqual({ data: [] });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/v1/alerts/events?limit=50&offset=0",
+      "/api/backend/api/v1/alerts/events?limit=50&offset=0",
       expect.anything(),
     );
   });

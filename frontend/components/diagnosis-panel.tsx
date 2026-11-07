@@ -9,7 +9,8 @@ import type { Incident } from "@/lib/types";
 export function DiagnosisPanel({
   incident,
   onDiagnosed,
-}: Readonly<{ incident: Incident; onDiagnosed: (incident: Incident) => Promise<Incident> }>) {
+  canDiagnose = false,
+}: Readonly<{ incident: Incident; onDiagnosed: (incident: Incident) => Promise<Incident>; canDiagnose?: boolean }>) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,7 +31,7 @@ export function DiagnosisPanel({
     <section className="panel p-5 sm:p-6">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
         <div><h2>AI diagnosis</h2><p className="mt-1 text-sm text-slate-400">Advisory output from the configured diagnosis provider.</p></div>
-        <button className="button" onClick={runDiagnosis} disabled={running}>{running ? "Running diagnosis…" : diagnosis ? "Run again" : "Run AI Diagnosis"}</button>
+        {canDiagnose && <button className="button" onClick={runDiagnosis} disabled={running}>{running ? "Running diagnosis…" : diagnosis ? "Run again" : "Run AI Diagnosis"}</button>}
       </div>
       {error && <p className="mt-5 rounded-lg border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-100" role="alert">{error}</p>}
       {diagnosis ? <>

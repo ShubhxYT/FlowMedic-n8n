@@ -149,3 +149,16 @@ export interface AlertRulePage {
 export interface AlertEventPage {
   data: AlertEvent[];
 }
+
+export interface AccountWorkspace {
+  id: string;
+  name: string;
+  role: "admin" | "viewer";
+}
+
+export interface CurrentUser {
+  user: { id: string | null; email: string };
+  workspace: AccountWorkspace;
+  workspaces: AccountWorkspace[];
+  demo: boolean;
+}

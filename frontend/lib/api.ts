@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  CurrentUser,
   AlertEventPage,
   AlertRulePage,
   HealthResponse,
@@ -13,7 +14,9 @@ import type {
   WorkflowPage,
 } from "@/lib/types";
 
-const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000").replace(
+import { csrfToken } from "@/lib/auth";
+
+const apiBaseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(
   /\/$/,
   "",
 );
@@ -34,13 +37,21 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   try {
     response = await fetch(`${apiBaseUrl}${path}`, {
       ...options,
-      headers: { Accept: "application/json", ...options?.headers },
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json", ...(
+        options?.method && !["GET", "HEAD"].includes(options.method)
+          ? { "X-CSRF-Token": csrfToken() } : {}
+      ), ...options?.headers },
     });
   } catch {
     throw new ApiError("FlowMedic backend is unavailable. Check that the API is running.", 0);
   }
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined" && !["/api/v1/auth/login", "/api/v1/auth/signup"].includes(path)) {
+      window.dispatchEvent(new Event("flowmedic:session-expired"));
+    }
     const body = (await response.json().catch(() => ({}))) as ApiErrorBody;
     throw new ApiError(
       body.error?.message ?? "The request could not be completed.",
@@ -51,7 +62,22 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+const jsonBody = (value: unknown) => ({
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value),
+});
+
 export const api = {
+  csrf: () => request<{ registration_enabled: boolean }>("/api/v1/auth/csrf"),
+  me: () => request<CurrentUser>("/api/v1/auth/me"),
+  login: (email: string, password: string) => request("/api/v1/auth/login", jsonBody({ email, password })),
+  signup: (email: string, password: string) => request("/api/v1/auth/signup", jsonBody({ email, password })),
+  logout: () => request("/api/v1/auth/logout", { method: "POST" }),
+  selectWorkspace: (workspace_id: string) => request("/api/v1/auth/workspace", jsonBody({ workspace_id })),
+  invite: (role: "admin" | "viewer") => request<{ url: string }>("/api/v1/auth/invites", jsonBody({ role })),
+  acceptInvite: (token: string) => request("/api/v1/auth/invites/accept", jsonBody({ token })),
+  members: () => request<{ data: { id: string; email: string; role: "admin" | "viewer" }[] }>("/api/v1/auth/members"),
+  updateMember: (id: string, role: "admin" | "viewer") => request(`/api/v1/auth/members/${id}`, { ...jsonBody({ role }), method: "PATCH" }),
+  removeMember: (id: string) => request(`/api/v1/auth/members/${id}`, { method: "DELETE" }),
   health: () => request<HealthResponse>("/health"),
   systemStatus: () => request<SystemStatus>("/api/v1/system/status"),
   monitoringStatus: () => request<MonitoringStatus>("/api/v1/monitoring/status"),

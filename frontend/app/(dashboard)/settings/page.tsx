@@ -1,5 +1,6 @@
 "use client";
 
+import { WorkspaceMembers } from "@/components/workspace-members";
 import { PageHeader } from "@/components/page-header";
 import { StatePanel } from "@/components/state-panel";
 import { api } from "@/lib/api";
@@ -57,6 +58,7 @@ export default function SettingsPage() {
         title="Settings & connection"
         description="Operational state provided by the backend. API keys and connection secrets are never exposed."
       />
+      <WorkspaceMembers />
       {system.loading || health.loading || monitoring.loading ? (
         <StatePanel
           title="Loading backend status"

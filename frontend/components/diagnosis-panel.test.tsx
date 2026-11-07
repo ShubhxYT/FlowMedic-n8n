@@ -13,7 +13,7 @@ const incident: Incident = {
 describe("DiagnosisPanel", () => {
   it("runs the diagnosis action and preserves the advisory warning", async () => {
     const onDiagnosed = vi.fn().mockResolvedValue(incident);
-    render(<DiagnosisPanel incident={incident} onDiagnosed={onDiagnosed} />);
+    render(<DiagnosisPanel canDiagnose incident={incident} onDiagnosed={onDiagnosed} />);
     fireEvent.click(screen.getByRole("button", { name: "Run AI Diagnosis" }));
     expect(onDiagnosed).toHaveBeenCalledWith(incident);
     expect(await screen.findByText("No diagnosis yet")).toBeInTheDocument();
@@ -21,7 +21,7 @@ describe("DiagnosisPanel", () => {
 
   it("shows a safe error when diagnosis fails", async () => {
     const onDiagnosed = vi.fn().mockRejectedValue(new Error("network failure"));
-    render(<DiagnosisPanel incident={incident} onDiagnosed={onDiagnosed} />);
+    render(<DiagnosisPanel canDiagnose incident={incident} onDiagnosed={onDiagnosed} />);
     fireEvent.click(screen.getByRole("button", { name: "Run AI Diagnosis" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Diagnosis could not be completed.");
   });

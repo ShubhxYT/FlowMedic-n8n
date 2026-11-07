@@ -28,7 +28,7 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-import OverviewPage from "@/app/page";
+import OverviewPage from "@/app/(dashboard)/page";
 
 describe("OverviewPage", () => {
   it("renders an honest empty incident state", async () => {
