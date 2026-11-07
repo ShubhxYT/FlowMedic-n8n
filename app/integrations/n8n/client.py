@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
@@ -36,9 +36,7 @@ class N8nWorkflowPage(BaseModel):
 
 
 def is_failed(
-    execution: Execution, 
-    canceled_is_failure: bool = False, 
-    waiting_threshold_hours: int = 24
+    execution: Execution, canceled_is_failure: bool = False, waiting_threshold_hours: int = 24
 ) -> bool:
     """
     Improved status classification for Issue #16:
@@ -76,11 +74,11 @@ def is_failed(
             try:
                 # Ensure timezone-aware comparison
                 if target_time.tzinfo is None:
-                    target_time = target_time.replace(tzinfo=timezone.utc)
-                
-                age_hours = (datetime.now(timezone.utc) - target_time).total_seconds() / 3600
+                    target_time = target_time.replace(tzinfo=UTC)
+
+                age_hours = (datetime.now(UTC) - target_time).total_seconds() / 3600
                 if age_hours > waiting_threshold_hours:
-                    return True # Surfaces as a stuck problem / failure
+                    return True  # Surfaces as a stuck problem / failure
             except Exception:
                 pass
 
