@@ -20,11 +20,23 @@ retention. There is no bundled n8n server or live credential requirement in test
 
 Only normalized metadata and bounded error text are persisted or sent to AI. Node
 inputs/outputs, raw execution payloads, credential objects, and stack fields are
-discarded. Known configured keys, common credential assignments, URLs, and email
-addresses are redacted from text. Sanitization is heuristic: arbitrary sensitive text
-embedded in a node name or an error message cannot be reliably detected. Use synthetic
-data until you validate your workflows' error messages and data policy. Do not enable
-an external AI provider for sensitive workloads without that review.
+discarded. Known configured keys, common credential assignments, URLs, email
+addresses, and common bare token shapes are redacted from text before it is persisted
+to SQLite and before it is sent to an AI provider. The AI provider repeats redaction
+before building its prompt as defense in depth. Covered token shapes include
+OpenAI-style `sk-...` keys, GitHub `ghp_...`/`github_pat_...` tokens, Slack
+`xoxb-...` tokens, AWS `AKIA...`/`ASIA...` access key IDs, JWTs beginning with `eyJ`,
+standalone hexadecimal strings of 32 or more characters, and conservative
+high-entropy Base64/Base64URL-like strings of 32 or more characters.
+
+Sanitization is heuristic and cannot guarantee detection of every possible secret
+format, especially custom token formats, short secrets, or secrets split across
+fields. Long high-entropy identifiers can be over-redacted. Do not deliberately
+include credentials or other sensitive values in error messages or node names. Use
+synthetic data until you validate your workflows' error messages and data policy. Do
+not enable an external AI provider for sensitive workloads without that review.
+Sanitization applies to new writes; rows persisted before this protection existed are
+not retroactively scrubbed, so review and purge old incident records if needed.
 
 The database itself is not encrypted. Restrict filesystem access. Use HTTPS for remote
 n8n/AI connections; base URLs are operator-controlled and cannot be supplied through

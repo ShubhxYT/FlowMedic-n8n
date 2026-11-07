@@ -445,7 +445,7 @@ class MonitoringService:
             now = utc_now()
             checkpoint.last_checked_at = now
             checkpoint.last_error_at = now
-            checkpoint.last_error_summary = error.message[:500]
+            checkpoint.last_error_summary = sanitize(error.message, self._secrets())[:500]
             checkpoint.consecutive_failure_count += 1
             checkpoint.updated_at = now
             session.commit()
