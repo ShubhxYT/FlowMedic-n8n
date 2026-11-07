@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
+from app import models  # noqa: F401
 from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
 from app.api.routes import router
 from app.core.config import Settings

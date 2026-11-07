@@ -10,9 +10,13 @@ class Base(DeclarativeBase):
 
 
 class Incident(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "incidents"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "execution_id", name="uq_incidents_workspace"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    execution_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    execution_id: Mapped[str] = mapped_column(String(255), index=True)
     workflow_id: Mapped[str] = mapped_column(String(255))
     workflow_name: Mapped[str] = mapped_column(String(1000))
     failed_node: Mapped[str | None] = mapped_column(String(1000))
@@ -26,8 +30,13 @@ class Incident(Base):
 
 
 class MonitoringCheckpoint(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "monitoring_checkpoints"
-    __table_args__ = (UniqueConstraint("source", "source_identifier"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "source", "source_identifier", name="uq_checkpoint_workspace"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     source: Mapped[str] = mapped_column(String(50), index=True)
@@ -54,8 +63,11 @@ class MonitoringCheckpoint(Base):
 
 
 class ExecutionHistory(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "execution_history"
-    __table_args__ = (UniqueConstraint("source", "execution_id"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "source", "execution_id", name="uq_history_workspace"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     source: Mapped[str] = mapped_column(String(50), index=True)
@@ -71,10 +83,12 @@ class ExecutionHistory(Base):
 
 
 class AlertRule(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "alert_rules"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_rule_workspace"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name: Mapped[str] = mapped_column(String(255), unique=True)
+    name: Mapped[str] = mapped_column(String(255))
     trigger_type: Mapped[str] = mapped_column(String(50), index=True)
     enabled: Mapped[bool] = mapped_column(default=False)
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=300)
@@ -84,13 +98,14 @@ class AlertRule(Base):
 
 
 class AlertEvent(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "alert_events"
-    __table_args__ = (UniqueConstraint("event_key"),)
+    __table_args__ = (UniqueConstraint("workspace_id", "event_key", name="uq_event_workspace"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     rule_id: Mapped[str] = mapped_column(ForeignKey("alert_rules.id"), index=True)
     trigger_type: Mapped[str] = mapped_column(String(50), index=True)
-    event_key: Mapped[str] = mapped_column(String(64), unique=True)
+    event_key: Mapped[str] = mapped_column(String(64))
     deduplication_key: Mapped[str] = mapped_column(String(255), index=True)
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), index=True)
     workflow_id: Mapped[str | None] = mapped_column(String(255), index=True)
@@ -116,8 +131,13 @@ class AlertDeliveryAttempt(Base):
 
 
 class AlertConditionState(Base):
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     __tablename__ = "alert_condition_states"
-    __table_args__ = (UniqueConstraint("condition_type", "scope_key"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "condition_type", "scope_key", name="uq_condition_workspace"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     condition_type: Mapped[str] = mapped_column(String(50), index=True)
