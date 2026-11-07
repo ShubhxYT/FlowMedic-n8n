@@ -205,7 +205,8 @@ backend address. It is browser-visible configuration and must not contain a toke
 | `MONITOR_RETRY_BASE_SECONDS` | `2` | Initial exponential-backoff delay |
 | `EXECUTION_HISTORY_RETENTION_DAYS` | `30` | Retained execution-history window; incidents are not deleted |
 | `RETENTION_CLEANUP_INTERVAL_SECONDS` | `86400` | Minimum interval between retention cleanup attempts |
-| `RETENTION_CLEANUP_BATCH_SIZE` | `500` | Maximum history records deleted in one cleanup run |
+| `RETENTION_CLEANUP_BATCH_SIZE` | `500` | History records deleted per cleanup batch; cleanup repeats batches until the eligible backlog is drained |
+| `RETENTION_CLEANUP_BUDGET_SECONDS` | `300` | Maximum wall-clock time for one retention cleanup run; remaining backlog is deleted on the next run |
 | `ALERT_DEFAULT_COOLDOWN_SECONDS` | `300` | Suggested cooldown when creating an alert rule; 60–86400 seconds |
 | `ALERT_MAX_RETRIES` | `3` | Maximum persisted attempts for one alert event |
 | `ALERT_WEBHOOK_URL` | unset | Enables the webhook provider only for a globally routable HTTPS IP endpoint; hostnames, local, private, reserved, and link-local destinations are rejected |

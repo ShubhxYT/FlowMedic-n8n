@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -373,7 +374,7 @@ class MonitoringService:
         if not active:
             raise ServiceError("monitoring_lease_lost", "Monitoring ownership lease was lost", 503)
 
-    def _run_retention_if_due(self) -> None:
+    def _run_retention_if_due(self, monotonic=time.monotonic) -> None:
         with self.session_factory() as session:
             checkpoints = MonitoringRepository(session)
             checkpoint = checkpoints.checkpoint(SOURCE, SOURCE_IDENTIFIER)
@@ -386,13 +387,43 @@ class MonitoringService:
                 return
             logger.info("retention_started")
             cutoff = now - timedelta(days=self.settings.execution_history_retention_days)
-            deleted = ExecutionHistoryRepository(session).delete_recorded_before(
-                cutoff, self.settings.retention_cleanup_batch_size
-            )
+            batch_size = self.settings.retention_cleanup_batch_size
+            deadline = monotonic() + self.settings.retention_cleanup_budget_seconds
+            repository = ExecutionHistoryRepository(session)
+            deleted = 0
+            batches = 0
+            budget_exhausted = False
+            while True:
+                if monotonic() >= deadline:
+                    budget_exhausted = batches > 0
+                    logger.warning(
+                        "retention_time_budget_exhausted deleted_rows=%s budget_seconds=%s",
+                        deleted,
+                        self.settings.retention_cleanup_budget_seconds,
+                    )
+                    break
+                try:
+                    batch_deleted = repository.delete_recorded_before(cutoff, batch_size)
+                    session.commit()
+                except Exception:
+                    # Never leave the shared session holding a failed transaction.
+                    session.rollback()
+                    raise
+                batches += 1
+                deleted += batch_deleted
+                if batch_deleted < batch_size:
+                    # Fewer than one full batch deleted: the eligible backlog is drained.
+                    break
             checkpoint.last_retention_at = now
             checkpoint.updated_at = now
             session.commit()
-            logger.info("retention_deleted_count count=%s", deleted)
+            logger.info("retention_deleted_count count=%s batches=%s", deleted, batches)
+            if budget_exhausted:
+                logger.info(
+                    "retention_backlog_deferred deleted_rows=%s next_run_due_after_seconds=%s",
+                    deleted,
+                    self.settings.retention_cleanup_interval_seconds,
+                )
             logger.info("retention_completed")
 
     def _record_failure(self, error: ServiceError) -> None:
