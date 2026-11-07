@@ -12,14 +12,17 @@ from app import models  # noqa: F401
 from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
 from app.api.auth import router as auth_router
 from app.api.routes import router
+from app.api.settings import router as settings_router
 from app.core.config import Settings
 from app.core.database import create_database
 from app.core.encryption import ConnectionCipher
 from app.core.errors import ServiceError
 from app.core.migrations import upgrade_database
+from app.core.security import BodySizeLimitMiddleware
 from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
 from app.demo import demo_failure, seed_demo_history
 from app.integrations.n8n.client import N8nClient
+from app.integrations.outbound import OutboundHTTP, OutboundPolicy
 from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID
 from app.models.incident import Base
 from app.repositories.connections import verify_keyring_startup
@@ -30,6 +33,7 @@ from app.services.alerts import (
     MockAlertDeliveryProvider,
     WebhookAlertDeliveryProvider,
 )
+from app.services.connections import ConnectionService
 from app.services.monitoring import MonitoringService
 
 
@@ -47,6 +51,7 @@ def create_app(
     n8n_transport=None,
     ai_transport=None,
     webhook_transport=None,
+    outbound_transport=None,
 ):
     config = settings or Settings()
 
@@ -81,13 +86,35 @@ def create_app(
             )
         app.state.alerts = AlertService(config, integration_factory, providers=providers)
         try:
+            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
             async with (
-                httpx.AsyncClient(transport=n8n_transport, follow_redirects=False) as n8n_http,
-                httpx.AsyncClient(transport=ai_transport, follow_redirects=False) as ai_http,
+                httpx.AsyncClient(
+                    transport=n8n_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as n8n_http,
+                httpx.AsyncClient(
+                    transport=ai_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as ai_http,
+                httpx.AsyncClient(
+                    transport=outbound_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as outbound_http,
             ):
-                app.state.n8n = N8nClient(config, n8n_http)
+                policy = OutboundPolicy(config)
+                outbound = OutboundHTTP(outbound_http, policy)
+                app.state.connections = ConnectionService(
+                    factory, cipher, outbound, notify_changed=lambda: None
+                )
+                app.state.n8n = N8nClient(config, OutboundHTTP(n8n_http, policy))
                 app.state.provider = (
-                    CompatibleAIProvider(config, ai_http)
+                    CompatibleAIProvider(config, OutboundHTTP(ai_http, policy))
                     if config.ai_api_key.get_secret_value() and not config.demo_mode
                     else MockDiagnosisProvider()
                 )
@@ -189,6 +216,7 @@ def create_app(
         }
 
     app.include_router(auth_router)
+    app.include_router(settings_router)
     app.include_router(
         router,
         responses={
@@ -205,6 +233,7 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
+    app.add_middleware(BodySizeLimitMiddleware)
     return app
 
 

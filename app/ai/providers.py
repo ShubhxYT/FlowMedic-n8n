@@ -46,16 +46,18 @@ class CompatibleAIProvider:
 
     name = "openai-compatible"
 
-    def __init__(self, settings, client: httpx.AsyncClient):
+    def __init__(self, settings, outbound, guard=None):
         self.settings = settings
-        self.client = client
+        self.outbound = outbound
+        self.guard = guard
 
     async def diagnose(self, context: Failure) -> Diagnosis:
         try:
-            response = await self.client.post(
-                self.settings.ai_base_url + "/chat/completions",
+            response = await self.outbound.post(
+                self.settings.ai_base_url,
+                "/chat/completions",
                 headers={"Authorization": "Bearer " + self.settings.ai_api_key.get_secret_value()},
-                timeout=self.settings.request_timeout,
+                guard=self.guard,
                 json={
                     "model": self.settings.ai_model,
                     "messages": [
@@ -94,6 +96,18 @@ class CompatibleAIProvider:
                     for key, value in diagnosis.model_dump().items()
                 }
             )
+        except ServiceError as exc:
+            if exc.code == "upstream_timeout":
+                raise ServiceError("ai_timeout", "Diagnosis provider timed out", 504) from None
+            if exc.code in {
+                "upstream_unreachable",
+                "upstream_redirect_rejected",
+                "upstream_response_too_large",
+            }:
+                raise ServiceError(
+                    "ai_error", "Diagnosis provider failed or returned invalid output"
+                ) from None
+            raise
         except httpx.TimeoutException:
             raise ServiceError("ai_timeout", "Diagnosis provider timed out", 504) from None
         except (httpx.HTTPError, ValueError, ValidationError, KeyError, IndexError, TypeError):

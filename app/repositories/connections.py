@@ -99,7 +99,7 @@ class ConnectionRepository:
         )
         if not include_deleted:
             statement = statement.where(model.deleted.is_(False))
-        row = self.session.scalar(statement)
+        row = self.session.scalar(statement.execution_options(populate_existing=True))
         if row is None:
             raise not_found()
         return row
@@ -257,7 +257,9 @@ class ConnectionRepository:
         )
 
     def state(self) -> WorkspaceConnectionState:
-        state = self.session.get(WorkspaceConnectionState, self.workspace_id)
+        state = self.session.get(
+            WorkspaceConnectionState, self.workspace_id, populate_existing=True
+        )
         if state is None:
             state = WorkspaceConnectionState(
                 workspace_id=self.workspace_id,
@@ -267,6 +269,20 @@ class ConnectionRepository:
             self.session.add(state)
             self.session.flush()
         return state
+
+    def clear_default_if(self, provider_id: str) -> None:
+        self.session.execute(
+            update(WorkspaceConnectionState)
+            .where(
+                WorkspaceConnectionState.workspace_id == self.workspace_id,
+                WorkspaceConnectionState.default_ai_provider_id == provider_id,
+            )
+            .values(
+                default_ai_provider_id=None,
+                revision=WorkspaceConnectionState.revision + 1,
+            ),
+            execution_options={"synchronize_session": False},
+        )
 
     def set_default(self, provider_id: str, expected_state_revision: int) -> int:
         provider = self.get("ai", provider_id)
