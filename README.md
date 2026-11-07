@@ -45,7 +45,7 @@ diagnosis is certain.
 
 ## Public demo deployment
 
-For a shareable, **synthetic read-only** portfolio preview, see [deployment guide](docs/public-demo-deployment.md). This provisions a Render demo API and a Vercel dashboard through your own accounts; **no live demo URL is claimed until both sites have been deployed and verified**. Never configure real n8n or AI credentials in this public demo.
+For a shareable, **synthetic read-only** portfolio preview, see [deployment guide](docs/public-demo-deployment.md). This provisions a Render demo API and a Vercel dashboard through your own account.
 
 ## Product preview
 
@@ -107,9 +107,9 @@ tests/                 Offline backend and API tests
 
 - **Read-only n8n integration:** the client issues API reads only; FlowMedic has no workflow
   write or repair capability.
-- **Idempotent ingestion:** incidents are keyed by execution ID, and the repository handles
-  duplicate-insert races safely. Execution history has its own source + execution-ID uniqueness
-  constraint.
+- **Idempotent ingestion:** incidents are keyed by workspace + execution ID, and the repository
+  handles duplicate-insert races safely. Execution history has its own workspace + source +
+  execution-ID uniqueness constraint.
 - **Fresh-first cursor strategy:** every scheduled cycle reads n8n's newest page with no cursor.
   A separate opaque backfill cursor advances older pages in bounded work; no execution-ID ordering
   is assumed and repeated newest-page reads are safe through database uniqueness.
@@ -180,9 +180,17 @@ npm ci
 npm run dev
 ```
 
-Open `http://127.0.0.1:3000`. The frontend defaults to
-`http://127.0.0.1:8000`; set `NEXT_PUBLIC_API_BASE_URL` in `.env.local` to use another
-backend address. It is browser-visible configuration and must not contain a token or secret.
+Before opening `http://127.0.0.1:3000`, configure the backend `.env` for local HTTP with
+`AUTH_ALLOW_INSECURE_COOKIES=true` and
+`AUTH_TRUSTED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000`, then provision the operator
+using `python -m app.commands.bootstrap_owner` followed by its email argument. The command
+prompts for the password without echoing it. Back up an existing database first as described
+in [operations](docs/operations.md#accounts-and-workspace-ownership).
+
+The frontend defaults to the same-origin `/api/backend` proxy. Set the server-only
+`BACKEND_INTERNAL_URL=http://127.0.0.1:8000` in `.env.local`; never place a provider key or
+service token in any `NEXT_PUBLIC_` variable. Use secure-cookie defaults with an exact HTTPS
+trusted origin in production.
 
 ### Environment variables
 
@@ -194,7 +202,8 @@ backend address. It is browser-visible configuration and must not contain a toke
 | `AI_API_KEY` | empty | Selects a live compatible provider; empty uses the mock provider |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | Trusted OpenAI-compatible provider base URL |
 | `AI_MODEL` | `gpt-4.1-mini` | Model expected to support strict JSON-schema output |
-| `FLOWMEDIC_API_KEY` | empty | Optional bearer token for routes other than `/health` |
+| `FLOWMEDIC_API_KEY` | empty | Optional internal service token; user sessions are independently required |
+| `DIAGNOSE_RATE_LIMIT_PER_MINUTE` | `5` | Per-caller limit on `diagnose`; in-memory, per process |
 | `DEMO_MODE` | `false` | Enables the synthetic, credentials-free demo; cannot be combined with n8n or AI keys |
 | `CORS_ALLOW_ORIGINS` | local dashboard origins | Comma-separated frontend origins permitted by FastAPI |
 | `MONITOR_POLL_INTERVAL_SECONDS` | `60` | Read-only polling cadence; 10–3600 seconds |
@@ -205,17 +214,24 @@ backend address. It is browser-visible configuration and must not contain a toke
 | `MONITOR_RETRY_BASE_SECONDS` | `2` | Initial exponential-backoff delay |
 | `EXECUTION_HISTORY_RETENTION_DAYS` | `30` | Retained execution-history window; incidents are not deleted |
 | `RETENTION_CLEANUP_INTERVAL_SECONDS` | `86400` | Minimum interval between retention cleanup attempts |
-| `RETENTION_CLEANUP_BATCH_SIZE` | `500` | History records deleted per cleanup batch; cleanup repeats batches until the eligible backlog is drained |
+| `RETENTION_CLEANUP_BATCH_SIZE` | `500` | Maximum history records deleted in one cleanup run |
 | `RETENTION_CLEANUP_BUDGET_SECONDS` | `300` | Maximum wall-clock time for one retention cleanup run; remaining backlog is deleted on the next run |
 | `ALERT_DEFAULT_COOLDOWN_SECONDS` | `300` | Suggested cooldown when creating an alert rule; 60–86400 seconds |
 | `ALERT_MAX_RETRIES` | `3` | Maximum persisted attempts for one alert event |
 | `ALERT_WEBHOOK_URL` | unset | Enables the webhook provider only for a globally routable HTTPS IP endpoint; hostnames, local, private, reserved, and link-local destinations are rejected |
 | `ALERT_WEBHOOK_TIMEOUT_SECONDS` | `5` | Strict outbound webhook timeout; greater than 0 and at most 15 seconds |
 | `ALERT_WEBHOOK_SIGNING_SECRET` | empty | Optional HMAC-SHA256 signing secret; never persisted or returned by the API |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8000` | Frontend-only API base URL in `frontend/.env.local` |
+| `NEXT_PUBLIC_API_BASE_URL` | `/api/backend` | Same-origin browser proxy prefix |
+| `AUTH_REGISTRATION_ENABLED` | `false` | Explicit policy for public private-workspace signup |
+| `AUTH_ALLOW_INSECURE_COOKIES` | `false` | Allow HTTP cookies only for loopback development origins |
+| `AUTH_TRUSTED_ORIGINS` | `https://localhost:3000` | Exact allowed mutation origins, comma-separated |
+| `AUTH_SESSION_SECONDS` | `43200` | Absolute session lifetime |
+| `AUTH_INVITE_SECONDS` | `86400` | Single-use invitation lifetime |
+| `API_DOCS_ENABLED` | `false` | Explicitly enable docs only for private development |
 
-Without n8n credentials, local health and incident endpoints still work; n8n operations return
-a safe configuration error.
+Without n8n credentials, `/health` remains public and authenticated workspace data remains
+available. Legacy-workspace n8n operations return safe configuration errors; new workspaces
+show an empty unconfigured state and never inherit the legacy integration.
 
 ## Demo mode
 
@@ -224,7 +240,9 @@ one persistent, clearly synthetic workflow failure, a deterministic mock diagnos
 synthetic execution histories that exercise healthy, degraded, and unhealthy dashboard states.
 
 ```bash
-DEMO_MODE=true DATABASE_URL=sqlite:///./flowmedic-demo.db \
+DEMO_MODE=true PUBLIC_DEMO_READONLY=true DATABASE_URL=sqlite:///./flowmedic-demo.db \
+  alembic upgrade head
+DEMO_MODE=true PUBLIC_DEMO_READONLY=true DATABASE_URL=sqlite:///./flowmedic-demo.db \
   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
@@ -232,8 +250,9 @@ Then start the dashboard as above. Do not use demo mode with `N8N_API_KEY` or `A
 
 ## API
 
-Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs` when optional
-bearer authentication is disabled.
+Real business routes require a user session, and mutations additionally require an allowed
+Origin and CSRF token. `/health` is public. Interactive documentation and OpenAPI are disabled
+by default; `API_DOCS_ENABLED=true` enables them for private development only.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -249,8 +268,9 @@ bearer authentication is disabled.
 | `GET` | `/api/v1/executions/failed` | Normalized failures from a recent execution page |
 | `POST` | `/api/v1/incidents/sync` | Explicitly ingest failures into persistent incidents |
 | `GET` | `/api/v1/incidents` | List persisted incidents with offset pagination |
+| `PATCH` | `/api/v1/incidents/{incident_id}` | Resolve an incident with `{"status": "resolved"}`; sets `resolved_at`, keeps it in history, and stops it counting toward workflow health |
 | `GET` | `/api/v1/incidents/{incident_id}` | Read one incident |
-| `POST` | `/api/v1/incidents/{incident_id}/diagnose` | Generate and persist an advisory diagnosis |
+| `POST` | `/api/v1/incidents/{incident_id}/diagnose` | Generate and persist an advisory diagnosis; an existing diagnosis requires `?force=true` (409 otherwise) |
 | `GET`, `POST`, `PATCH` | `/api/v1/alerts/rules` | View or explicitly configure mock or configured-webhook alert rules |
 | `GET` | `/api/v1/alerts/events` | View persisted alert-event history |
 | `GET` | `/api/v1/alerts/events/{event_id}/deliveries` | View safe, persisted delivery attempts |
@@ -333,12 +353,15 @@ never trigger, replay, modify, or repair a workflow. Do not commit `.env` or cre
 
 ```bash
 cp .env.example .env
-docker compose up --build
+alembic upgrade head
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Compose binds the API and dashboard to localhost, persists SQLite in a named volume, and runs
-the API image as a non-root user. The API is available at `http://127.0.0.1:8000` and the
-dashboard at `http://127.0.0.1:3000`.
+Compose runs a one-shot `migrate` service before starting the API. The API starts only
+after `alembic upgrade head` completes successfully; if migration fails, Compose does
+not start the API. The migration service and API share the same persistent SQLite volume.
+The API and dashboard are available at `http://127.0.0.1:8000` and
+`http://127.0.0.1:3000`, respectively.
 
 ## Testing and CI
 
@@ -408,8 +431,17 @@ commit, rebuilds the affected image and performs a rolling health-checked replac
 
 The browser never calls the API host directly: the dashboard uses the
 `/api/backend/[...path]` route handler, which forwards requests server-side with
-`FLOWMEDIC_API_KEY` attached. That keeps the bearer token out of the bundle, means any number of
-dashboard origins work without CORS changes, and lets the API stay closed to anonymous traffic.
+its optional internal `FLOWMEDIC_API_KEY` plus the browser's selected session/CSRF cookies.
+The backend validates user membership independently of that service token. Configure the exact
+dashboard origin in `AUTH_TRUSTED_ORIGINS`; the proxy preserves it for CSRF checks and disables
+shared response caching. API and dashboard access to real data both require a user session.
+
+Database migrations must run as a separate one-shot deployment task before the API
+is started or replaced. Run `alembic upgrade head` using the API image, the production
+environment, and the same persistent `/data` volume. Configure this as a pre-deploy
+or release task in the deployment platform. The API container itself must not run
+migrations on startup: doing so would allow multiple replicas to race against the
+same database. A failed migration must block the API deployment.
 
 Redeploy by hand:
 
@@ -426,4 +458,20 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## Reviewer entry points
 
-For a short code tour, start with app/services/health.py (deterministic rules), app/integrations/n8n/client.py (upstream API boundary) and tests/test_monitoring.py (monitoring behavior). Use the documented synthetic demo to inspect the system before configuring live integrations. This is a portfolio implementation; the README's test commands are reproducible checks, not a claim that every deployment has been validated.
+For a short code tour, start with app/services/health.py (deterministic rules), app/integrations/n8n/client.py (upstream API boundary) and tests/test_monitoring.py (monitoring behavior). Use the ...
+
+## Account access
+
+FlowMedic requires an account session for real dashboard/API data. Upgrade storage and explicitly
+bootstrap the legacy operator with `python -m app.commands.bootstrap_owner` followed by its email
+argument; passwords are entered with hidden prompts. Signup creates a private empty workspace;
+admins can invite collaborators as viewers or admins through Settings. Existing n8n/AI credentials
+belong solely to the legacy operator workspace. A shared API bearer token never replaces a user
+session. See [account operations](docs/operations.md#accounts-and-workspace-ownership) for backup,
+HTTPS cookies, CSRF, registration policy, password reset and session revocation instructions.
+
+Local HTTP development requires `AUTH_ALLOW_INSECURE_COOKIES=true` and
+`AUTH_TRUSTED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000` in the backend `.env`.
+The frontend uses `NEXT_PUBLIC_API_BASE_URL=/api/backend` and
+`BACKEND_INTERNAL_URL=http://127.0.0.1:8000`; Compose supplies `http://api:8000` internally.
+Keep `AUTH_ALLOW_INSECURE_COOKIES=false` for deployed HTTPS.

@@ -9,19 +9,26 @@ from app.core.errors import ServiceError
 from app.core.security import sanitize
 from app.integrations.n8n.client import Execution, ExecutionPage, is_failed
 from app.repositories.incidents import IncidentRepository
-from app.repositories.monitoring import ExecutionHistoryRepository, MonitoringRepository, is_expired
+from app.repositories.monitoring import (
+    ExecutionHistoryRepository,
+    MonitoringRepository,
+    fence_poll_write,
+    is_expired,
+)
 from app.schemas.domain import MonitoringStatus, MonitoringSyncResult
 from app.services.incidents import normalize
 
 logger = logging.getLogger(__name__)
 SOURCE = "n8n"
-SOURCE_IDENTIFIER = "default"
 TRANSIENT_CODES = {
     "n8n_timeout",
     "n8n_unreachable",
     "n8n_rate_limited",
     "n8n_server_error",
 }
+WORKFLOW_NAMES_TTL = 300
+WORKFLOW_NAMES_PAGE_SIZE = 250
+WORKFLOW_NAMES_MAX_PAGES = 4
 
 
 def utc_now() -> datetime:
@@ -37,34 +44,44 @@ def execution_success(status: str | None) -> bool | None:
 
 
 class MonitoringService:
-    """Read-only fresh polling with a bounded, durable historical backfill."""
+    """One read-only poller scoped to a single workspace and n8n instance."""
 
-    def __init__(self, settings, session_factory, n8n, alerts=None):
+    def __init__(self, settings, session_factory, n8n, snapshot, alerts=None, poll_slots=None):
         self.settings = settings
         self.session_factory = session_factory
         self.n8n = n8n
+        self.snapshot = snapshot
         self.alerts = alerts
+        self.workspace_id = snapshot.workspace_id
+        self.instance_id = snapshot.id
+        self.snapshot_revision = snapshot.revision
+        self.poll_slots = poll_slots
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
+        self._sync_tasks: set[asyncio.Task] = set()
         self._owner_id = str(uuid.uuid4())
-        self._state = "disabled" if not self.enabled else "idle"
+        self._state = "idle"
         self._stopping = False
+        self._lease_lost = False
+        if alerts is not None:
+            alerts.write_fence = self._fence
+            alerts.transient_secrets = self._secrets()
+        self._names_cache: tuple[float, dict[str, str]] | None = None
 
     @property
     def enabled(self) -> bool:
-        return bool(
-            not self.settings.demo_mode
-            and self.settings.n8n_base_url
-            and self.settings.n8n_api_key.get_secret_value()
-        )
+        return True
 
     async def start(self) -> None:
-        if not self.enabled or self._task is not None:
+        if not self.enabled:
+            return
+        if self._task is not None and not self._task.done():
             return
         self._stopping = False
-        self._task = asyncio.create_task(self._loop(), name="flowmedic-monitor")
+        self._task = asyncio.create_task(self._loop(), name=f"flowmedic-monitor-{self.instance_id}")
         logger.info(
-            "monitoring_loop_started interval_seconds=%s",
+            "monitoring_loop_started instance_id=%s interval_seconds=%s",
+            self.instance_id,
             self.settings.monitor_poll_interval_seconds,
         )
 
@@ -75,21 +92,42 @@ class MonitoringService:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        logger.info("monitoring_loop_stopped")
+        pending = list(self._sync_tasks)
+        for operation in pending:
+            operation.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._release_lease()
+        logger.info("monitoring_loop_stopped instance_id=%s", self.instance_id)
 
     async def _loop(self) -> None:
-        while not self._stopping:
-            try:
-                await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
-            except asyncio.CancelledError:
-                raise
-            await self.sync()
+        # sync() handles its own failures, but the lease/alerts paths around it can
+        # still raise. A background poller must never die from one bad iteration.
+        try:
+            while not self._stopping:
+                try:
+                    await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
+                except asyncio.CancelledError:
+                    raise
+                try:
+                    await self.sync()
+                except Exception:
+                    logger.warning(
+                        "monitoring_loop_iteration_failed instance_id=%s", self.instance_id
+                    )
+        finally:
+            if not self._stopping:
+                logger.error("monitoring_loop_exited_unexpectedly instance_id=%s", self.instance_id)
+            self._task = None
+
+    def _session(self):
+        if not hasattr(self.session_factory, "workspace_id"):
+            raise RuntimeError("Monitoring requires a workspace-scoped factory")
+        return self.session_factory()
 
     def status(self) -> MonitoringStatus:
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).existing_checkpoint(
-                SOURCE, SOURCE_IDENTIFIER
-            )
+        with self._session() as session:
+            repository = MonitoringRepository(session, self.workspace_id, self.instance_id)
+            checkpoint = repository.existing_checkpoint(SOURCE)
             if checkpoint is None:
                 lease_state = "unclaimed"
             elif checkpoint.lease_expires_at is not None and not is_expired(
@@ -99,17 +137,24 @@ class MonitoringService:
             else:
                 lease_state = "unclaimed"
             return MonitoringStatus(
-                enabled=self.enabled,
-                state="disabled" if not self.enabled else self._state,
+                workspace_id=self.workspace_id,
+                instance_id=self.instance_id,
+                instance_name=self.snapshot.name,
+                enabled=True,
+                state=self._state,
                 poll_interval_seconds=self.settings.monitor_poll_interval_seconds,
                 last_checked_at=checkpoint.last_checked_at if checkpoint else None,
                 last_fresh_poll_at=checkpoint.last_fresh_poll_at if checkpoint else None,
-                last_successful_sync_at=checkpoint.last_successful_sync_at if checkpoint else None,
+                last_successful_sync_at=(
+                    checkpoint.last_successful_sync_at if checkpoint else None
+                ),
                 last_error_at=checkpoint.last_error_at if checkpoint else None,
                 last_error_summary=checkpoint.last_error_summary if checkpoint else None,
-                consecutive_failure_count=checkpoint.consecutive_failure_count if checkpoint else 0,
+                consecutive_failure_count=(
+                    checkpoint.consecutive_failure_count if checkpoint else 0
+                ),
                 backfill_pending=bool(checkpoint and checkpoint.backfill_cursor),
-                backfill_completed_at=checkpoint.backfill_completed_at if checkpoint else None,
+                backfill_completed_at=(checkpoint.backfill_completed_at if checkpoint else None),
                 backfill_state=(
                     "disabled"
                     if self.settings.monitor_backfill_pages_per_cycle == 0
@@ -123,67 +168,145 @@ class MonitoringService:
             )
 
     async def sync(self) -> MonitoringSyncResult:
-        if not self.enabled:
-            return MonitoringSyncResult(status="disabled")
         if self._lock.locked():
-            return MonitoringSyncResult(status="skipped")
-        async with self._lock:
-            if not self._acquire_lease():
-                self._state = "idle"
-                logger.info("lease_contended")
-                return MonitoringSyncResult(status="skipped")
-            was_degraded = self._state == "degraded"
-            self._state = "running"
-            try:
-                result = await self._sync_with_retries()
-            except ServiceError as exc:
-                self._record_failure(exc)
-                self._state = "degraded"
-                self._evaluate_alerts(monitoring_state="degraded")
-                logger.warning("monitoring_poll_failed code=%s", exc.code)
-                return MonitoringSyncResult(status="failed")
-            except Exception:
-                self._record_failure(
-                    ServiceError("monitoring_error", "Monitoring poll failed", 503)
-                )
-                self._state = "degraded"
-                self._evaluate_alerts(monitoring_state="degraded")
-                logger.exception("monitoring_poll_failed code=monitoring_error")
-                return MonitoringSyncResult(status="failed")
-            finally:
-                self._release_lease()
-            self._state = "idle"
-            self._evaluate_alerts(monitoring_state="idle", workflow_health=True)
-            if was_degraded:
-                logger.info("monitoring_recovered")
-            logger.info(
-                (
-                    "monitoring_poll_completed executions_discovered=%s "
-                    "history_records_created=%s incidents_created=%s"
-                ),
-                result.executions_discovered,
-                result.history_records_created,
-                result.incidents_created,
+            return MonitoringSyncResult(
+                status="skipped", workspace_id=self.workspace_id, instance_id=self.instance_id
             )
-            return result
+        task = asyncio.current_task()
+        self._sync_tasks.add(task)
+        try:
+            async with self._lock:
+                if self.poll_slots is None:
+                    return await self._sync_owned()
+                async with self.poll_slots:
+                    return await self._sync_owned()
+        finally:
+            self._sync_tasks.discard(task)
+
+    async def _sync_owned(self) -> MonitoringSyncResult:
+        guard = getattr(self.n8n, "guard", None)
+        if guard is not None:
+            guard()
+        if not self._acquire_lease():
+            self._state = "idle"
+            logger.info("lease_contended instance_id=%s", self.instance_id)
+            return MonitoringSyncResult(
+                status="skipped", workspace_id=self.workspace_id, instance_id=self.instance_id
+            )
+        was_degraded = self._state == "degraded"
+        self._state = "running"
+        self._lease_lost = False
+        heartbeat = asyncio.create_task(
+            self._heartbeat_loop(asyncio.current_task()),
+            name=f"flowmedic-heartbeat-{self.instance_id}",
+        )
+        try:
+            result = await self._sync_with_retries()
+            await self._evaluate_alerts(monitoring_state="idle", workflow_health=True)
+        except asyncio.CancelledError:
+            if self._lease_lost:
+                self._state = "idle"
+                raise ServiceError(
+                    "monitoring_lease_lost", "Monitoring ownership changed", 409
+                ) from None
+            raise
+        except ServiceError as exc:
+            if exc.code in {"connection_changed", "monitoring_lease_lost"}:
+                self._state = "idle"
+                logger.warning(
+                    "monitoring_stopped instance_id=%s code=%s", self.instance_id, exc.code
+                )
+                raise
+            self._record_failure(exc)
+            self._state = "degraded"
+            await self._evaluate_alerts(monitoring_state="degraded")
+            logger.warning(
+                "monitoring_poll_failed instance_id=%s code=%s", self.instance_id, exc.code
+            )
+            return MonitoringSyncResult(
+                status="failed", workspace_id=self.workspace_id, instance_id=self.instance_id
+            )
+        except Exception:
+            self._record_failure(ServiceError("monitoring_error", "Monitoring poll failed", 503))
+            self._state = "degraded"
+            await self._evaluate_alerts(monitoring_state="degraded")
+            logger.warning(
+                "monitoring_poll_failed instance_id=%s code=monitoring_error", self.instance_id
+            )
+            return MonitoringSyncResult(
+                status="failed", workspace_id=self.workspace_id, instance_id=self.instance_id
+            )
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            self._release_lease()
+        self._state = "idle"
+        if was_degraded:
+            logger.info("monitoring_recovered instance_id=%s", self.instance_id)
+        logger.info(
+            (
+                "monitoring_poll_completed instance_id=%s executions_discovered=%s "
+                "history_records_created=%s incidents_created=%s"
+            ),
+            self.instance_id,
+            result.executions_discovered,
+            result.history_records_created,
+            result.incidents_created,
+        )
+        return result
 
     def _acquire_lease(self) -> bool:
-        with self.session_factory() as session:
-            acquired, recovered = MonitoringRepository(session).acquire_lease(
-                SOURCE,
-                SOURCE_IDENTIFIER,
-                self._owner_id,
-                self.settings.monitor_lease_seconds,
-            )
+        with self._session() as session:
+            acquired, recovered = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).acquire_lease(SOURCE, self._owner_id, self.settings.monitor_lease_seconds)
         if acquired:
-            logger.info("lease_acquired")
+            logger.info("lease_acquired instance_id=%s", self.instance_id)
             if recovered:
-                logger.info("lease_recovered")
+                logger.info("lease_recovered instance_id=%s", self.instance_id)
         return acquired
 
     def _release_lease(self) -> None:
-        with self.session_factory() as session:
-            MonitoringRepository(session).release_lease(SOURCE, SOURCE_IDENTIFIER, self._owner_id)
+        try:
+            with self._session() as session:
+                MonitoringRepository(session, self.workspace_id, self.instance_id).release_lease(
+                    SOURCE, self._owner_id
+                )
+        except Exception:
+            logger.warning("lease_release_failed instance_id=%s", self.instance_id)
+
+    async def _heartbeat_loop(self, operation: asyncio.Task) -> None:
+        interval = min(10, self.settings.monitor_lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self._heartbeat_lease()
+            except Exception:
+                self._lease_lost = True
+                operation.cancel()
+                return
+
+    def _heartbeat_lease(self) -> None:
+        if self._lease_lost:
+            raise ServiceError("monitoring_lease_lost", "Monitoring ownership lease was lost", 409)
+        with self._session() as session:
+            active = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).heartbeat_lease(SOURCE, self._owner_id, self.settings.monitor_lease_seconds)
+        if not active:
+            self._lease_lost = True
+            raise ServiceError("monitoring_lease_lost", "Monitoring ownership lease was lost", 409)
+
+    def _fence(self, session) -> None:
+        fence_poll_write(
+            session,
+            workspace_id=self.workspace_id,
+            instance_id=self.instance_id,
+            revision=self.snapshot_revision,
+            owner_id=self._owner_id,
+            lease_seconds=self.settings.monitor_lease_seconds,
+        )
 
     async def _sync_with_retries(self) -> MonitoringSyncResult:
         for attempt in range(self.settings.monitor_max_retries + 1):
@@ -195,7 +318,8 @@ class MonitoringService:
                     raise
                 delay = self.settings.monitor_retry_base_seconds * (2**attempt)
                 logger.warning(
-                    "monitoring_retry attempt=%s delay_seconds=%s code=%s",
+                    "monitoring_retry instance_id=%s attempt=%s delay_seconds=%s code=%s",
+                    self.instance_id,
                     attempt + 1,
                     delay,
                     exc.code,
@@ -205,40 +329,57 @@ class MonitoringService:
         raise ServiceError("monitoring_error", "Monitoring poll failed", 503)
 
     async def _sync_cycle(self) -> MonitoringSyncResult:
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        with self._session() as session:
+            repository = MonitoringRepository(session, self.workspace_id, self.instance_id)
+            checkpoint = repository.checkpoint(SOURCE)
             prior_backfill_cursor = checkpoint.backfill_cursor or checkpoint.cursor_value
             session.commit()
 
-        logger.info("fresh_poll_started")
+        workflow_names = await self._workflow_names()
+
+        logger.info("fresh_poll_started instance_id=%s", self.instance_id)
         fresh_page = await self.n8n.recent_executions(self.settings.monitor_page_size, None)
         fresh_entries = await self._hydrate(fresh_page)
-        fresh_counts = self._persist_fresh_page(fresh_entries, fresh_page, prior_backfill_cursor)
-        logger.info("fresh_poll_completed executions_discovered=%s", len(fresh_entries))
+        fresh_counts = await self._persist_fresh_page(
+            fresh_entries, fresh_page, prior_backfill_cursor, workflow_names
+        )
+        logger.info(
+            "fresh_poll_completed instance_id=%s executions_discovered=%s",
+            self.instance_id,
+            len(fresh_entries),
+        )
 
         discovered, history_created, incidents_created = fresh_counts
         cursor = prior_backfill_cursor
         if cursor is None or self.settings.monitor_backfill_pages_per_cycle == 0:
-            logger.info("backfill_skipped")
+            logger.info("backfill_skipped instance_id=%s", self.instance_id)
         else:
-            logger.info("backfill_started")
+            logger.info("backfill_started instance_id=%s", self.instance_id)
             for _ in range(self.settings.monitor_backfill_pages_per_cycle):
                 if cursor is None:
                     break
                 self._heartbeat_lease()
                 page = await self.n8n.recent_executions(self.settings.monitor_page_size, cursor)
                 entries = await self._hydrate(page)
-                counts, cursor = self._persist_backfill_page(entries, page)
+                counts, cursor = await self._persist_backfill_page(entries, page, workflow_names)
                 discovered += counts[0]
                 history_created += counts[1]
                 incidents_created += counts[2]
-            logger.info("backfill_completed pending=%s", bool(cursor))
+            logger.info(
+                "backfill_completed instance_id=%s pending=%s",
+                self.instance_id,
+                bool(cursor),
+            )
 
         self._run_retention_if_due()
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        with self._session() as session:
+            checkpoint = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).checkpoint(SOURCE)
             return MonitoringSyncResult(
                 status="completed",
+                workspace_id=self.workspace_id,
+                instance_id=self.instance_id,
                 executions_discovered=discovered,
                 history_records_created=history_created,
                 incidents_created=incidents_created,
@@ -249,20 +390,77 @@ class MonitoringService:
         entries: list[Execution] = []
         for execution in page.data:
             if execution.status is None or is_failed(execution):
-                entries.append(await self.n8n.execution_details(execution.id))
+                self._heartbeat_lease()
+                try:
+                    entries.append(await self.n8n.execution_details(execution.id))
+                except ServiceError as exc:
+                    if exc.status_code not in {404, 410}:
+                        raise
+                    logger.warning(
+                        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+                        execution.id,
+                        exc.status_code,
+                    )
+                    entries.append(
+                        Execution(
+                            id=execution.id,
+                            workflowId=execution.workflowId,
+                            status=None,
+                            startedAt=execution.startedAt,
+                            stoppedAt=execution.stoppedAt,
+                        )
+                    )
             else:
                 entries.append(execution)
         return entries
 
-    def _persist_fresh_page(
+    async def _workflow_names(self) -> dict[str, str]:
+        """Resolve workflow ids to names, cached for WORKFLOW_NAMES_TTL seconds.
+
+        Failures are non-fatal: monitoring must keep working even if the workflow
+        listing endpoint is unavailable or the test double does not implement it.
+        """
+        now = time.monotonic()
+        if self._names_cache is not None and now - self._names_cache[0] < WORKFLOW_NAMES_TTL:
+            return self._names_cache[1]
+        fetch = getattr(self.n8n, "workflows", None)
+        if fetch is None:
+            return {}
+        names: dict[str, str] = {}
+        cursor = None
+        try:
+            for _ in range(WORKFLOW_NAMES_MAX_PAGES):
+                page = await fetch(limit=WORKFLOW_NAMES_PAGE_SIZE, cursor=cursor)
+                for workflow in page.data:
+                    names[workflow.id] = workflow.name
+                cursor = page.nextCursor
+                if not cursor:
+                    break
+        except Exception:
+            logger.warning("workflow_names_unavailable")
+            return self._names_cache[1] if self._names_cache else {}
+        self._names_cache = (now, names)
+        return names
+
+    async def _persist_fresh_page(
         self,
         entries: list[Execution],
         page: ExecutionPage,
         prior_backfill_cursor: str | None,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[int, int, int]:
-        counts = self._persist_entries(entries)
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        new_incidents = []
+        with self._session() as session:
+            self._fence(session)
+            counts = self._persist_entries(
+                entries,
+                session=session,
+                new_incidents=new_incidents,
+                workflow_names=workflow_names,
+            )
+            checkpoint = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).checkpoint(SOURCE)
             now = utc_now()
             if checkpoint.backfill_cursor is None and checkpoint.cursor_value:
                 checkpoint.backfill_cursor = checkpoint.cursor_value
@@ -281,16 +479,28 @@ class MonitoringService:
             checkpoint.consecutive_failure_count = 0
             checkpoint.updated_at = now
             session.commit()
+        for incident_id, workflow_id in new_incidents:
+            await self._evaluate_alerts(incident_id=incident_id, workflow_id=workflow_id)
         return len(entries), *counts
 
-    def _persist_backfill_page(
+    async def _persist_backfill_page(
         self,
         entries: list[Execution],
         page: ExecutionPage,
+        workflow_names: dict[str, str] | None = None,
     ) -> tuple[tuple[int, int, int], str | None]:
-        counts = self._persist_entries(entries)
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        new_incidents = []
+        with self._session() as session:
+            self._fence(session)
+            counts = self._persist_entries(
+                entries,
+                session=session,
+                new_incidents=new_incidents,
+                workflow_names=workflow_names,
+            )
+            checkpoint = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).checkpoint(SOURCE)
             now = utc_now()
             checkpoint.backfill_cursor = page.nextCursor
             if page.nextCursor is None:
@@ -301,48 +511,55 @@ class MonitoringService:
             checkpoint.consecutive_failure_count = 0
             checkpoint.updated_at = now
             session.commit()
+        for incident_id, workflow_id in new_incidents:
+            await self._evaluate_alerts(incident_id=incident_id, workflow_id=workflow_id)
         return (len(entries), *counts), page.nextCursor
 
-    def _persist_entries(self, entries: list[Execution]) -> tuple[int, int]:
-        with self.session_factory() as session:
-            history = ExecutionHistoryRepository(session)
-            incidents = IncidentRepository(session)
-            created_history = 0
-            created_incidents = 0
-            new_incidents: list[tuple[str, str]] = []
-            secrets = self._secrets()
-            for detail in entries:
-                record, inserted = history.create_once(
-                    source=SOURCE,
-                    workflow_id=detail.workflowId,
-                    workflow_name=sanitize(self._workflow_name(detail), secrets),
-                    execution_id=detail.id,
-                    execution_status=detail.status,
-                    recorded_at=utc_now(),
-                    started_at=detail.startedAt,
-                    stopped_at=detail.stoppedAt,
-                    is_success=execution_success(detail.status),
+    def _persist_entries(
+        self, entries, *, session=None, new_incidents=None, workflow_names=None
+    ) -> tuple[int, int]:
+        if session is None:
+            with self._session() as owned:
+                self._fence(owned)
+                counts = self._persist_entries(
+                    entries,
+                    session=owned,
+                    new_incidents=new_incidents,
+                    workflow_names=workflow_names,
                 )
-                created_history += int(inserted)
-                if is_failed(detail):
-                    incident, created = incidents.create_once(normalize(detail, secrets))
-                    history.attach_incident(record, incident.id)
-                    created_incidents += int(created)
-                    if created:
-                        new_incidents.append((incident.id, incident.workflow_id))
-            session.commit()
-        for incident_id, workflow_id in new_incidents:
-            self._evaluate_alerts(
-                incident_id=incident_id,
-                workflow_id=workflow_id,
+                owned.commit()
+                return counts
+        history = ExecutionHistoryRepository(session, self.workspace_id, self.instance_id)
+        incidents = IncidentRepository(session, self.workspace_id, self.instance_id)
+        created_history = created_incidents = 0
+        secrets = self._secrets()
+        for detail in entries:
+            record, inserted = history.create_once(
+                source=SOURCE,
+                workflow_id=detail.workflowId,
+                workflow_name=sanitize(self._workflow_name(detail, workflow_names), secrets),
+                execution_id=detail.id,
+                execution_status=detail.status,
+                recorded_at=utc_now(),
+                started_at=detail.startedAt,
+                stopped_at=detail.stoppedAt,
+                is_success=execution_success(detail.status),
             )
-        if entries:
-            logger.info("monitoring_executions_discovered count=%s", len(entries))
-        else:
-            logger.info("monitoring_no_new_data")
+            created_history += int(inserted)
+            if is_failed(detail):
+                incident, created = incidents.create_once(normalize(detail, secrets))
+                history.attach_incident(record, incident.id)
+                created_incidents += int(created)
+                if created and new_incidents is not None:
+                    new_incidents.append((incident.id, incident.workflow_id))
+        logger.info(
+            "monitoring_executions_discovered instance_id=%s count=%s",
+            self.instance_id,
+            len(entries),
+        )
         return created_history, created_incidents
 
-    def _evaluate_alerts(
+    async def _evaluate_alerts(
         self,
         *,
         incident_id: str | None = None,
@@ -352,44 +569,45 @@ class MonitoringService:
     ) -> None:
         if self.alerts is None:
             return
-        try:
-            if incident_id is not None and workflow_id is not None:
-                self.alerts.on_new_incident(incident_id, workflow_id)
-            if monitoring_state is not None:
-                self.alerts.evaluate_monitoring_state(monitoring_state)
-            if workflow_health:
-                self.alerts.evaluate_workflow_health()
-        except Exception:
-            # Alerting must never prevent read-only monitoring persistence.
-            logger.exception("alert_evaluation_failed")
 
-    def _heartbeat_lease(self) -> None:
-        with self.session_factory() as session:
-            active = MonitoringRepository(session).heartbeat_lease(
-                SOURCE,
-                SOURCE_IDENTIFIER,
-                self._owner_id,
-                self.settings.monitor_lease_seconds,
-            )
-        if not active:
-            raise ServiceError("monitoring_lease_lost", "Monitoring ownership lease was lost", 503)
+        def evaluate():
+            try:
+                if incident_id is not None and workflow_id is not None:
+                    self.alerts.on_new_incident(incident_id, workflow_id)
+                if monitoring_state is not None:
+                    self.alerts.evaluate_monitoring_state(monitoring_state)
+                if workflow_health:
+                    self.alerts.evaluate_workflow_health()
+            except ServiceError:
+                raise
+            except Exception:
+                logger.warning("alert_evaluation_failed instance_id=%s", self.instance_id)
+
+        delivery = asyncio.create_task(asyncio.to_thread(evaluate))
+        try:
+            await asyncio.shield(delivery)
+        except asyncio.CancelledError:
+            # The thread may own a delivery; shutdown must await it before closing pools.
+            with suppress(ServiceError):
+                await delivery
+            raise
 
     def _run_retention_if_due(self, monotonic=time.monotonic) -> None:
-        with self.session_factory() as session:
-            checkpoints = MonitoringRepository(session)
-            checkpoint = checkpoints.checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        with self._session() as session:
+            repository = MonitoringRepository(session, self.workspace_id, self.instance_id)
+            checkpoint = repository.checkpoint(SOURCE)
             now = utc_now()
-            if checkpoint.last_retention_at is not None and now - (
-                checkpoint.last_retention_at.replace(tzinfo=UTC)
-                if checkpoint.last_retention_at.tzinfo is None
-                else checkpoint.last_retention_at.astimezone(UTC)
+            last = checkpoint.last_retention_at
+            if last is not None and now - (
+                last.replace(tzinfo=UTC) if last.tzinfo is None else last.astimezone(UTC)
             ) < timedelta(seconds=self.settings.retention_cleanup_interval_seconds):
                 return
-            logger.info("retention_started")
+            self._fence(session)
+            logger.info("retention_started instance_id=%s", self.instance_id)
             cutoff = now - timedelta(days=self.settings.execution_history_retention_days)
             batch_size = self.settings.retention_cleanup_batch_size
             deadline = monotonic() + self.settings.retention_cleanup_budget_seconds
-            repository = ExecutionHistoryRepository(session)
+            history = ExecutionHistoryRepository(session, self.workspace_id, self.instance_id)
             deleted = 0
             batches = 0
             budget_exhausted = False
@@ -397,57 +615,63 @@ class MonitoringService:
                 if monotonic() >= deadline:
                     budget_exhausted = batches > 0
                     logger.warning(
-                        "retention_time_budget_exhausted deleted_rows=%s budget_seconds=%s",
+                        "retention_time_budget_exhausted instance_id=%s deleted_rows=%s budget_seconds=%s",
+                        self.instance_id,
                         deleted,
                         self.settings.retention_cleanup_budget_seconds,
                     )
                     break
                 try:
-                    batch_deleted = repository.delete_recorded_before(cutoff, batch_size)
+                    batch_deleted = history.delete_recorded_before(cutoff, batch_size)
                     session.commit()
                 except Exception:
-                    # Never leave the shared session holding a failed transaction.
                     session.rollback()
                     raise
                 batches += 1
                 deleted += batch_deleted
                 if batch_deleted < batch_size:
-                    # Fewer than one full batch deleted: the eligible backlog is drained.
                     break
             checkpoint.last_retention_at = now
             checkpoint.updated_at = now
             session.commit()
-            logger.info("retention_deleted_count count=%s batches=%s", deleted, batches)
+            logger.info(
+                "retention_deleted_count instance_id=%s count=%s batches=%s",
+                self.instance_id,
+                deleted,
+                batches,
+            )
             if budget_exhausted:
                 logger.info(
-                    "retention_backlog_deferred deleted_rows=%s next_run_due_after_seconds=%s",
+                    "retention_backlog_deferred instance_id=%s deleted_rows=%s next_run_due_after_seconds=%s",
+                    self.instance_id,
                     deleted,
                     self.settings.retention_cleanup_interval_seconds,
                 )
-            logger.info("retention_completed")
+            logger.info("retention_completed instance_id=%s", self.instance_id)
 
     def _record_failure(self, error: ServiceError) -> None:
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+        with self._session() as session:
+            self._fence(session)
+            checkpoint = MonitoringRepository(
+                session, self.workspace_id, self.instance_id
+            ).checkpoint(SOURCE)
             now = utc_now()
             checkpoint.last_checked_at = now
             checkpoint.last_error_at = now
-            checkpoint.last_error_summary = error.message[:500]
+            checkpoint.last_error_summary = sanitize(error.message, self._secrets())[:500]
             checkpoint.consecutive_failure_count += 1
             checkpoint.updated_at = now
             session.commit()
 
     def _secrets(self) -> tuple[str, ...]:
-        return tuple(
-            key.get_secret_value()
-            for key in (
-                self.settings.n8n_api_key,
-                self.settings.ai_api_key,
-                self.settings.flowmedic_api_key,
-            )
+        return (
+            self.snapshot.api_key.get_secret_value(),
+            self.settings.flowmedic_api_key.get_secret_value(),
         )
 
     @staticmethod
-    def _workflow_name(execution: Execution) -> str:
+    def _workflow_name(execution: Execution, workflow_names: dict[str, str] | None = None) -> str:
         value = (execution.workflowData or {}).get("name")
+        if not (isinstance(value, str) and value):
+            value = (workflow_names or {}).get(execution.workflowId)
         return value if isinstance(value, str) and value else "Unknown workflow"
