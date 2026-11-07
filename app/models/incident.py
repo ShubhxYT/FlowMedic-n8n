@@ -35,6 +35,8 @@ class MonitoringCheckpoint(Base):
     # Kept only for the Phase 3 migration compatibility path. New monitoring uses backfill_cursor.
     cursor_value: Mapped[str | None] = mapped_column(Text)
     backfill_cursor: Mapped[str | None] = mapped_column(Text)
+    # Durable queue of fresh-page cursors awaiting processing (append-only, oldest first).
+    pending_cursors: Mapped[list[str] | None] = mapped_column(JSON)
     backfill_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_execution_id: Mapped[str | None] = mapped_column(String(255))
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

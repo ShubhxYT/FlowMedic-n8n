@@ -59,6 +59,55 @@ are synchronous and short; async endpoints can briefly block during database wor
 Use a single application worker for the initial SQLite deployment. Durable background
 jobs, bounded total sync deadlines, retry policies and checkpoint storage are future work.
 
+## Monitoring pagination and overflow
+
+Each polling cycle walks cursor chains in a fixed order. All positions are
+opaque n8n `nextCursor` tokens stored on `monitoring_checkpoints`; a duplicate
+boundary is detected by page content (zero new records), never by assuming
+numeric IDs or unique timestamps.
+
+1. **Pending fresh ranges.** Chain positions deferred by an earlier cycle are
+   durably queued in `pending_cursors` and walked first, oldest position
+   first. A queue entry is removed when its chain reaches the bottom of the
+   execution history or an all-duplicate page; a chain cut by the per-cycle
+   page budget stays queued and resumes in the next cycle. Nothing is
+   discarded because a backfill sweep is active.
+2. **Fresh overflow drain.** The newest page is always polled. When it
+   contains new executions, the drain follows `nextCursor` for up to
+   `MONITOR_OVERFLOW_PAGES_PER_CYCLE` additional pages, stopping at an
+   all-duplicate page, the bottom, or the budget. The first all-duplicate
+   page marks the fresh boundary; work beyond it belongs to the historical
+   sweep.
+3. **Historical backfill.** `MONITOR_BACKFILL_PAGES_PER_CYCLE` older pages are
+   walked from the backfill cursor. When a sweep reaches the bottom it
+   completes, and the next cycle re-seeds the sweep from the newest fresh
+   boundary, so the monitor never stays stuck on an obsolete cursor.
+   `MONITOR_BACKFILL_PAGES_PER_CYCLE=0` disables only this sweep; fresh
+   polling and pending-range recovery keep running, and a
+   `monitor_backfill_disabled_deferred_ranges` warning names the unverified
+   boundary (truncated opaque token) whenever queued or unverified ranges
+   remain. Deferred executions are reported as deferred, not ingested.
+
+Each page is persisted atomically: execution history rows, incident rows, and
+the checkpoint cursor state commit in one transaction, so a failed fetch or
+persist never leaves a cursor pointing past unpersisted executions. Concurrency
+is guarded by the existing `MONITOR_LEASE_SECONDS` ownership lease. A burst of
+`B` executions between polls is fully recovered within
+`N = ceil(B / (MONITOR_PAGE_SIZE * (1 + MONITOR_OVERFLOW_PAGES_PER_CYCLE)))`
+cycles; with defaults (50 x (1 + 10)) a 200-execution burst is ingested in a
+single cycle. The pending queue is drained (not folded) once all walks close,
+so it does not grow unbounded. `pending_fresh_cursor_count` on
+`/api/v1/monitoring/status` reports the queue size.
+
+Log events cover fresh work and deferred ranges without payloads or
+credentials: `monitoring_pending_walk_started`, `monitoring_overflow_detected`,
+`monitoring_page_ingested`, `monitoring_duplicate_boundary_detected`,
+`monitoring_chain_drained`, `monitoring_pending_range_deferred`,
+`monitoring_overflow_deferred`, `backfill_seeded`,
+`monitoring_backfill_disabled_deferred_ranges` (warning), and
+`monitoring_legacy_cursor_absorbed` (pre-queue `cursor_value` checkpoints are
+absorbed into the pending queue once, at upgrade).
+
 ## Diagnosis
 
 Mock responses are conservative deterministic rules, not AI inference. Live providers

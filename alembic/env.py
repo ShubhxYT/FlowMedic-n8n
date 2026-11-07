@@ -7,7 +7,10 @@ from app.models.incident import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True and would silence every
+    # pre-existing application logger (monitoring, alerts) for the rest of
+    # the process once migrations run.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 target_metadata = Base.metadata
 
 

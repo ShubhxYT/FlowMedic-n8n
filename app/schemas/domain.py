@@ -89,6 +89,7 @@ class MonitoringStatus(BaseModel):
     last_error_summary: str | None = None
     consecutive_failure_count: int = 0
     backfill_pending: bool = False
+    pending_fresh_cursor_count: int = 0
     backfill_completed_at: datetime | None = None
     backfill_state: BackfillState = "complete"
     lease_state: LeaseState = "unclaimed"

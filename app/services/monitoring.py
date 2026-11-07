@@ -2,6 +2,7 @@ import asyncio
 import logging
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.errors import ServiceError
@@ -33,6 +34,16 @@ def execution_success(status: str | None) -> bool | None:
     if status in {"error", "crashed"}:
         return False
     return None
+
+
+@dataclass
+class PageCounts:
+    """Observed counts and the trailing execution id of a single page."""
+
+    entries: int
+    history_created: int
+    incidents_created: int
+    last_id: str | None
 
 
 class MonitoringService:
@@ -109,6 +120,9 @@ class MonitoringService:
                 consecutive_failure_count=checkpoint.consecutive_failure_count if checkpoint else 0,
                 backfill_pending=bool(checkpoint and checkpoint.backfill_cursor),
                 backfill_completed_at=checkpoint.backfill_completed_at if checkpoint else None,
+                pending_fresh_cursor_count=(
+                    len(checkpoint.pending_cursors or []) if checkpoint else 0
+                ),
                 backfill_state=(
                     "disabled"
                     if self.settings.monitor_backfill_pages_per_cycle == 0
@@ -204,34 +218,124 @@ class MonitoringService:
         raise ServiceError("monitoring_error", "Monitoring poll failed", 503)
 
     async def _sync_cycle(self) -> MonitoringSyncResult:
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
-            prior_backfill_cursor = checkpoint.backfill_cursor or checkpoint.cursor_value
-            session.commit()
+        pending, backfill_cursor = self._load_walk_state()
+        remaining = self.settings.monitor_overflow_pages_per_cycle
+        discovered = 0
+        history_created = 0
+        incidents_created = 0
+        # Deepest fresh cursor this cycle proved to be a duplicate boundary.
+        fresh_terminal: str | None = None
 
+        def accumulate(counts: PageCounts) -> None:
+            nonlocal discovered, history_created, incidents_created
+            if counts.history_created == 0:
+                # Duplicate-verification page: no new executions were found.
+                return
+            discovered += counts.entries
+            history_created += counts.history_created
+            incidents_created += counts.incidents_created
+
+        def record_boundary(counts: PageCounts, next_cursor: str | None) -> None:
+            nonlocal fresh_terminal
+            if counts.history_created == 0 and next_cursor is not None:
+                # Every execution on this page was already recorded. The region
+                # below the cursor stays available to the backfill sweep.
+                fresh_terminal = next_cursor
+
+        def pending_apply(checkpoint, now, counts, next_cursor) -> None:
+            # Pop of this pending cursor is persisted atomically with the
+            # first page of its walk.
+            checkpoint.pending_cursors = list(pending)
+
+        def fresh_head_apply(checkpoint, now, counts, next_cursor) -> None:
+            checkpoint.last_checked_at = now
+            checkpoint.last_fresh_poll_at = now
+            if counts.last_id:
+                checkpoint.last_execution_id = counts.last_id
+
+        def fresh_drain_apply(checkpoint, now, counts, next_cursor) -> None:
+            checkpoint.last_checked_at = now
+            if counts.last_id:
+                checkpoint.last_execution_id = counts.last_id
+
+        # 1. Durable pending fresh ranges (oldest first): fresh work outranks history.
+        if pending:
+            logger.info("monitoring_pending_walk_started pending_fresh_cursors=%s", len(pending))
+        while pending and remaining > 0:
+            cursor = pending.pop(0)
+            resume = await self._walk_chain(
+                cursor,
+                "pending_fresh",
+                remaining,
+                pending_apply,
+                accumulate,
+                record_boundary,
+            )
+            if resume is not None:
+                pending.insert(0, resume)
+                self._save_pending(pending)
+                logger.info(
+                    "monitoring_pending_range_deferred pending_fresh_cursors=%s", len(pending)
+                )
+                break
+
+        # 2. Fresh head page, then bounded overflow drain from its cursor.
         logger.info("fresh_poll_started")
-        fresh_page = await self.n8n.recent_executions(self.settings.monitor_page_size, None)
-        fresh_entries = await self._hydrate(fresh_page)
-        fresh_counts = self._persist_fresh_page(fresh_entries, fresh_page, prior_backfill_cursor)
-        logger.info("fresh_poll_completed executions_discovered=%s", len(fresh_entries))
+        resume = await self._walk_chain(
+            None,
+            "fresh_drain",
+            remaining,
+            fresh_drain_apply,
+            accumulate,
+            record_boundary,
+            head_apply=fresh_head_apply,
+        )
+        logger.info("fresh_poll_completed pending_fresh_cursors=%s", len(pending))
+        if resume is not None:
+            pending.append(resume)
+            self._save_pending(pending)
+            logger.info("monitoring_overflow_deferred pending_fresh_cursors=%s", len(pending))
 
-        discovered, history_created, incidents_created = fresh_counts
-        cursor = prior_backfill_cursor
-        if cursor is None or self.settings.monitor_backfill_pages_per_cycle == 0:
+        # 3. Historical sweep: bounded, seeded from the newest fresh boundary.
+        if self.settings.monitor_backfill_pages_per_cycle == 0:
             logger.info("backfill_skipped")
+            if pending or backfill_cursor or fresh_terminal is not None:
+                logger.warning(
+                    (
+                        "monitor_backfill_disabled_deferred_ranges "
+                        "pending_fresh_cursors=%s outstanding_backfill_cursor=%s "
+                        "unverified_boundary_cursor=%s"
+                    ),
+                    len(pending),
+                    bool(backfill_cursor),
+                    fresh_terminal[:16] if fresh_terminal else "none",
+                )
         else:
-            logger.info("backfill_started")
-            for _ in range(self.settings.monitor_backfill_pages_per_cycle):
-                if cursor is None:
-                    break
-                self._heartbeat_lease()
-                page = await self.n8n.recent_executions(self.settings.monitor_page_size, cursor)
-                entries = await self._hydrate(page)
-                counts, cursor = self._persist_backfill_page(entries, page)
-                discovered += counts[0]
-                history_created += counts[1]
-                incidents_created += counts[2]
-            logger.info("backfill_completed pending=%s", bool(cursor))
+            if backfill_cursor is None:
+                if fresh_terminal is not None and not pending:
+                    self._seed_backfill(fresh_terminal)
+                    backfill_cursor = fresh_terminal
+                    logger.info("backfill_seeded below_fresh_boundary=true")
+                else:
+                    logger.info("backfill_not_needed")
+            if backfill_cursor is not None:
+                logger.info("backfill_started")
+
+                def backfill_apply(checkpoint, now, counts, next_cursor) -> None:
+                    checkpoint.backfill_cursor = next_cursor
+                    if next_cursor is None:
+                        checkpoint.backfill_completed_at = now
+
+                for _ in range(self.settings.monitor_backfill_pages_per_cycle):
+                    if backfill_cursor is None:
+                        break
+                    self._heartbeat_lease()
+                    counts, next_cursor = await self._fetch_and_persist_page(
+                        backfill_cursor, "backfill", backfill_apply
+                    )
+                    accumulate(counts)
+                    backfill_cursor = next_cursor
+                logger.info("backfill_completed pending=%s", bool(backfill_cursor))
 
         self._run_retention_if_due()
         with self.session_factory() as session:
@@ -244,6 +348,48 @@ class MonitoringService:
                 next_cursor=checkpoint.backfill_cursor,
             )
 
+    async def _walk_chain(
+        self,
+        start_cursor: str | None,
+        source: str,
+        budget: int,
+        page_apply,
+        accumulate,
+        record_boundary,
+        head_apply=None,
+    ) -> str | None:
+        """Walk consecutive pages of one cursor chain.
+
+        Stops on the bottom of the chain, on the first all-duplicate page
+        (zero new records proves the region below is already recorded), or
+        when the page budget is spent. Returns the cursor a later walk must
+        resume from, or None once the walk closed itself.
+        """
+        cursor = start_cursor
+        while True:
+            is_head = cursor is None
+            if is_head and source != "fresh_drain":
+                break
+            if not is_head and budget <= 0:
+                return cursor
+            apply = head_apply if is_head and head_apply is not None else page_apply
+            self._heartbeat_lease()
+            counts, next_cursor = await self._fetch_and_persist_page(cursor, source, apply)
+            accumulate(counts)
+            record_boundary(counts, next_cursor)
+            if is_head and counts.history_created > 0 and next_cursor is not None:
+                logger.info("monitoring_overflow_detected more_pages_available=true")
+            if next_cursor is None:
+                logger.info("monitoring_chain_drained source=%s", source)
+                return None
+            if counts.history_created == 0:
+                logger.info("monitoring_duplicate_boundary_detected source=%s", source)
+                return None
+            cursor = next_cursor
+            if not is_head:
+                budget -= 1
+        return None
+
     async def _hydrate(self, page: ExecutionPage) -> list[Execution]:
         entries: list[Execution] = []
         for execution in page.data:
@@ -253,82 +399,69 @@ class MonitoringService:
                 entries.append(execution)
         return entries
 
-    def _persist_fresh_page(
+    def _load_walk_state(self) -> tuple[list[str], str | None]:
+        """Load the pending fresh cursor queue and historical cursor.
+
+        Legacy Phase-3 ``cursor_value`` checkpoints are absorbed into the
+        pending queue exactly once so upgraded deployments never lose fresh
+        work that predates the pending queue.
+        """
+        with self.session_factory() as session:
+            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+            pending = list(checkpoint.pending_cursors or [])
+            legacy = checkpoint.cursor_value
+            if legacy:
+                if legacy not in pending:
+                    pending.insert(0, legacy)
+                    checkpoint.pending_cursors = pending
+                    logger.info("monitoring_legacy_cursor_absorbed")
+                checkpoint.cursor_value = None
+            backfill_cursor = checkpoint.backfill_cursor
+            session.commit()
+        return pending, backfill_cursor
+
+    def _save_pending(self, pending: list[str]) -> None:
+        with self.session_factory() as session:
+            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+            checkpoint.pending_cursors = list(pending)
+            checkpoint.updated_at = utc_now()
+            session.commit()
+
+    def _seed_backfill(self, cursor: str) -> None:
+        with self.session_factory() as session:
+            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
+            checkpoint.backfill_cursor = cursor
+            checkpoint.backfill_completed_at = None
+            checkpoint.updated_at = utc_now()
+            session.commit()
+
+    async def _fetch_and_persist_page(
         self,
-        entries: list[Execution],
-        page: ExecutionPage,
-        prior_backfill_cursor: str | None,
-    ) -> tuple[int, int, int]:
-        counts = self._persist_entries(entries)
+        cursor: str | None,
+        source: str,
+        apply,
+    ) -> tuple[PageCounts, str | None]:
+        """Fetch one page, hydrate it, then atomically persist entries + state."""
+        page = await self.n8n.recent_executions(self.settings.monitor_page_size, cursor)
+        entries = await self._hydrate(page)
         with self.session_factory() as session:
             checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
             now = utc_now()
-            if checkpoint.backfill_cursor is None and checkpoint.cursor_value:
-                checkpoint.backfill_cursor = checkpoint.cursor_value
-            checkpoint.cursor_value = None
-            if prior_backfill_cursor is None:
-                checkpoint.backfill_cursor = page.nextCursor
-                checkpoint.backfill_completed_at = None if page.nextCursor else now
-            checkpoint.last_execution_id = (
-                entries[-1].id if entries else checkpoint.last_execution_id
+            history_created, incidents_created, new_incidents = self._persist_entries_into(
+                entries, session
             )
-            checkpoint.last_checked_at = now
-            checkpoint.last_fresh_poll_at = now
+            counts = PageCounts(
+                entries=len(entries),
+                history_created=history_created,
+                incidents_created=incidents_created,
+                last_id=entries[-1].id if entries else None,
+            )
+            apply(checkpoint, now, counts, page.nextCursor)
             checkpoint.last_successful_sync_at = now
             checkpoint.last_error_at = None
             checkpoint.last_error_summary = None
             checkpoint.consecutive_failure_count = 0
             checkpoint.updated_at = now
-            session.commit()
-        return len(entries), *counts
-
-    def _persist_backfill_page(
-        self,
-        entries: list[Execution],
-        page: ExecutionPage,
-    ) -> tuple[tuple[int, int, int], str | None]:
-        counts = self._persist_entries(entries)
-        with self.session_factory() as session:
-            checkpoint = MonitoringRepository(session).checkpoint(SOURCE, SOURCE_IDENTIFIER)
-            now = utc_now()
-            checkpoint.backfill_cursor = page.nextCursor
-            if page.nextCursor is None:
-                checkpoint.backfill_completed_at = now
-            checkpoint.last_successful_sync_at = now
-            checkpoint.last_error_at = None
-            checkpoint.last_error_summary = None
-            checkpoint.consecutive_failure_count = 0
-            checkpoint.updated_at = now
-            session.commit()
-        return (len(entries), *counts), page.nextCursor
-
-    def _persist_entries(self, entries: list[Execution]) -> tuple[int, int]:
-        with self.session_factory() as session:
-            history = ExecutionHistoryRepository(session)
-            incidents = IncidentRepository(session)
-            created_history = 0
-            created_incidents = 0
-            new_incidents: list[tuple[str, str]] = []
-            secrets = self._secrets()
-            for detail in entries:
-                record, inserted = history.create_once(
-                    source=SOURCE,
-                    workflow_id=detail.workflowId,
-                    workflow_name=sanitize(self._workflow_name(detail), secrets),
-                    execution_id=detail.id,
-                    execution_status=detail.status,
-                    recorded_at=utc_now(),
-                    started_at=detail.startedAt,
-                    stopped_at=detail.stoppedAt,
-                    is_success=execution_success(detail.status),
-                )
-                created_history += int(inserted)
-                if is_failed(detail):
-                    incident, created = incidents.create_once(normalize(detail, secrets))
-                    history.attach_incident(record, incident.id)
-                    created_incidents += int(created)
-                    if created:
-                        new_incidents.append((incident.id, incident.workflow_id))
             session.commit()
         for incident_id, workflow_id in new_incidents:
             self._evaluate_alerts(
@@ -336,10 +469,52 @@ class MonitoringService:
                 workflow_id=workflow_id,
             )
         if entries:
-            logger.info("monitoring_executions_discovered count=%s", len(entries))
+            logger.info(
+                "monitoring_page_ingested source=%s entries=%s new_history=%s has_next_cursor=%s",
+                source,
+                len(entries),
+                history_created,
+                page.nextCursor is not None,
+            )
         else:
-            logger.info("monitoring_no_new_data")
-        return created_history, created_incidents
+            logger.info("monitoring_no_new_data source=%s", source)
+        return counts, page.nextCursor
+
+    def _persist_entries_into(
+        self, entries: list[Execution], session
+    ) -> tuple[int, int, list[tuple[str, str]]]:
+        """Persist executions inside an open session/transaction.
+
+        Returns (created_history, created_incidents, new_incidents); the caller
+        commits entries and checkpoint state together so a failed page can
+        never advance a cursor past unpersisted executions.
+        """
+        history = ExecutionHistoryRepository(session)
+        incidents = IncidentRepository(session)
+        created_history = 0
+        created_incidents = 0
+        new_incidents: list[tuple[str, str]] = []
+        secrets = self._secrets()
+        for detail in entries:
+            record, inserted = history.create_once(
+                source=SOURCE,
+                workflow_id=detail.workflowId,
+                workflow_name=sanitize(self._workflow_name(detail), secrets),
+                execution_id=detail.id,
+                execution_status=detail.status,
+                recorded_at=utc_now(),
+                started_at=detail.startedAt,
+                stopped_at=detail.stoppedAt,
+                is_success=execution_success(detail.status),
+            )
+            created_history += int(inserted)
+            if is_failed(detail):
+                incident, created = incidents.create_once(normalize(detail, secrets))
+                history.attach_incident(record, incident.id)
+                created_incidents += int(created)
+                if created:
+                    new_incidents.append((incident.id, incident.workflow_id))
+        return created_history, created_incidents, new_incidents
 
     def _evaluate_alerts(
         self,
