@@ -15,7 +15,7 @@ export default function SettingsPage() {
   const revisionKey = scope.instances.map(item => `${item.id}:${item.revision}`).join(",");
   const key = `${scope.workspaceId}:${scope.instanceId ?? "all"}:${revisionKey}`;
   return <>
-    <PageHeader title="Settings & connections" description="Connect your n8n instances and choose an AI provider for this workspace." />
+    <PageHeader eyebrow="System" title="Settings & connections" description="Connect your n8n instances and choose an AI provider for this workspace." />
     <div className="settings-grid connection-grid"><ConnectionSettings /></div>
     <SettingsStatus key={key} queryKey={key} />
     <WorkspaceMembers />

@@ -13,8 +13,9 @@ beforeEach(()=>{
   vi.mocked(api.workflows).mockImplementation(async id=>({data:[{workspace_id:"w",instance_id:id,id:"shared-id",name:"Live orders",active:true}],next_cursor:null}));
 });
 it("keeps reused workflow IDs as separate labelled rows and requires selection for live data",async()=>{
-  render(<WorkflowsPage/>);await screen.findByText("First · shared-id · 1 recent executions");
-  expect(screen.getByText("Second · shared-id · 1 recent executions")).toBeInTheDocument();
+  const label=(text:string)=>(_:string,element:Element|null)=>element?.tagName==="SPAN"&&element.classList.contains("subtle")&&element.textContent===text;
+  render(<WorkflowsPage/>);await screen.findByText(label("First · shared-id · 1 recent executions"));
+  expect(screen.getByText(label("Second · shared-id · 1 recent executions"))).toBeInTheDocument();
   expect(screen.getAllByRole("row")).toHaveLength(3);
   expect(screen.getByText("Select an n8n instance")).toBeInTheDocument();
   expect(api.workflows).not.toHaveBeenCalled();

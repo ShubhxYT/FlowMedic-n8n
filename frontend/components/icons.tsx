@@ -37,3 +37,15 @@ export function MenuIcon(props: IconProps) {
 export function ArrowIcon(props: IconProps) {
   return <Icon {...props}><path d="M5 12h14M13 6l6 6-6 6" /></Icon>;
 }
+
+export function BellIcon(props: IconProps) {
+  return <Icon {...props}><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9Z" /><path d="M10 19a2 2 0 0 0 4 0" /></Icon>;
+}
+
+export function CloseIcon(props: IconProps) {
+  return <Icon {...props}><path d="m6 6 12 12M18 6 6 18" /></Icon>;
+}
+
+export function LockIcon(props: IconProps) {
+  return <Icon {...props}><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></Icon>;
+}
