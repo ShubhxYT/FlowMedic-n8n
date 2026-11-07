@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker, with_loader_criteria
 
 from app.models.audit import AuditEvent
 from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID, Workspace
+from app.models.connections import AIProvider, N8nInstance
 from app.models.incident import (
     AlertConditionState,
     AlertDeliveryAttempt,
@@ -22,6 +23,8 @@ OWNED = (
     AlertRule,
     AlertEvent,
     AlertConditionState,
+    N8nInstance,
+    AIProvider,
 )
 
 
@@ -98,7 +101,7 @@ def scope_statement(state):
         mapper = state.bind_mapper
         if mapper is None or mapper.class_ not in OWNED:
             raise RuntimeError("Bulk updates are allowed only on owned business models")
-        allowed = {
+        monitoring_allowed = {
             "lease_owner_id",
             "lease_acquired_at",
             "lease_heartbeat_at",
@@ -106,7 +109,13 @@ def scope_statement(state):
             "updated_at",
         }
         changed_columns = {column.key for column in state.statement._values}
-        if mapper.class_ is not MonitoringCheckpoint or not changed_columns <= allowed:
+        if mapper.class_ is MonitoringCheckpoint:
+            allowed = monitoring_allowed
+        elif mapper.class_ in {N8nInstance, AIProvider}:
+            allowed = {"revision"}
+        else:
+            allowed = set()
+        if not changed_columns <= allowed:
             raise RuntimeError("Use normal ORM persistence for ownership-sensitive updates")
     if state.is_delete and (state.bind_mapper is None or state.bind_mapper.class_ not in OWNED):
         raise RuntimeError("Bulk deletion requires an owned model")

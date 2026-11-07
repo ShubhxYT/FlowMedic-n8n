@@ -46,20 +46,21 @@ class CompatibleAIProvider:
 
     name = "openai-compatible"
 
-    def __init__(self, settings, outbound, guard=None):
-        self.settings = settings
+    def __init__(self, snapshot, outbound, guard=None, *, transient_secrets=()):
+        self.snapshot = snapshot
         self.outbound = outbound
         self.guard = guard
+        self.transient_secrets = transient_secrets
 
     async def diagnose(self, context: Failure) -> Diagnosis:
         try:
             response = await self.outbound.post(
-                self.settings.ai_base_url,
+                self.snapshot.base_url,
                 "/chat/completions",
-                headers={"Authorization": "Bearer " + self.settings.ai_api_key.get_secret_value()},
+                headers={"Authorization": "Bearer " + self.snapshot.api_key.get_secret_value()},
                 guard=self.guard,
                 json={
-                    "model": self.settings.ai_model,
+                    "model": self.snapshot.model,
                     "messages": [
                         {
                             "role": "system",
@@ -85,11 +86,7 @@ class CompatibleAIProvider:
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             diagnosis = Diagnosis.model_validate(json.loads(content))
-            secrets = (
-                self.settings.ai_api_key.get_secret_value(),
-                self.settings.n8n_api_key.get_secret_value(),
-                self.settings.flowmedic_api_key.get_secret_value(),
-            )
+            secrets = (self.snapshot.api_key.get_secret_value(), *self.transient_secrets)
             return Diagnosis.model_validate(
                 {
                     key: sanitize(value, secrets) if isinstance(value, str) else value

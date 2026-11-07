@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from app import models  # noqa: F401
-from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
+from app.ai.providers import MockDiagnosisProvider
 from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.api.settings import router as settings_router
@@ -20,10 +20,10 @@ from app.core.errors import ServiceError
 from app.core.migrations import upgrade_database
 from app.core.security import BodySizeLimitMiddleware
 from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
-from app.demo import demo_failure, seed_demo_history
+from app.demo import DEMO_INSTANCE_ID, demo_failure, ensure_demo_instance, seed_demo_history
 from app.integrations.n8n.client import N8nClient
 from app.integrations.outbound import OutboundHTTP, OutboundPolicy
-from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID
+from app.models.auth import DEMO_WORKSPACE_ID
 from app.models.incident import Base
 from app.repositories.connections import verify_keyring_startup
 from app.repositories.incidents import IncidentRepository
@@ -32,6 +32,11 @@ from app.services.alerts import (
     AlertService,
     MockAlertDeliveryProvider,
     WebhookAlertDeliveryProvider,
+)
+from app.services.connection_registry import (
+    ConnectionRegistry,
+    read_enabled_snapshots,
+    revision_guard,
 )
 from app.services.connections import ConnectionService
 from app.services.monitoring import MonitoringService
@@ -58,7 +63,6 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         if ":memory:" in config.database_url:
-            # Isolated test databases do not share connections with Alembic's migration engine.
             engine, factory = create_database(config.database_url)
             Base.metadata.create_all(engine)
         else:
@@ -72,10 +76,6 @@ def create_app(
         verify_keyring_startup(factory, cipher, demo_mode=config.demo_mode)
         app.state.connection_cipher = cipher
         app.state.session_factory = factory
-        integration_factory = WorkspaceFactory(
-            factory, DEMO_WORKSPACE_ID if config.demo_mode else LEGACY_WORKSPACE_ID
-        )
-        app.state.monitoring = None
         providers = {"mock": MockAlertDeliveryProvider()}
         if config.alert_webhook_url and not config.demo_mode:
             providers["webhook"] = WebhookAlertDeliveryProvider(
@@ -84,7 +84,8 @@ def create_app(
                 signing_secret=config.alert_webhook_signing_secret.get_secret_value(),
                 transport=webhook_transport,
             )
-        app.state.alerts = AlertService(config, integration_factory, providers=providers)
+        app.state.alert_providers = providers
+        registry_holder: dict[str, ConnectionRegistry] = {}
         try:
             limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
             async with (
@@ -109,41 +110,82 @@ def create_app(
             ):
                 policy = OutboundPolicy(config)
                 outbound = OutboundHTTP(outbound_http, policy)
+                n8n_outbound = OutboundHTTP(n8n_http, policy)
+                app.state.outbound = outbound
+                app.state.ai_outbound = OutboundHTTP(ai_http, policy)
                 app.state.connections = ConnectionService(
-                    factory, cipher, outbound, notify_changed=lambda: None
+                    factory,
+                    cipher,
+                    outbound,
+                    notify_changed=lambda: registry_holder["registry"].notify_changed(),
                 )
-                app.state.n8n = N8nClient(config, OutboundHTTP(n8n_http, policy))
-                app.state.provider = (
-                    CompatibleAIProvider(config, OutboundHTTP(ai_http, policy))
-                    if config.ai_api_key.get_secret_value() and not config.demo_mode
-                    else MockDiagnosisProvider()
+
+                def read_enabled():
+                    if cipher is None:
+                        return []
+                    return read_enabled_snapshots(factory, cipher)
+
+                def build_worker(snapshot, slots):
+                    workspace_factory = WorkspaceFactory(factory, snapshot.workspace_id)
+                    alerts = AlertService(
+                        config,
+                        workspace_factory,
+                        snapshot.workspace_id,
+                        snapshot.id,
+                        providers=providers,
+                    )
+                    client = N8nClient(
+                        snapshot,
+                        n8n_outbound,
+                        guard=revision_guard(factory, snapshot),
+                    )
+                    return MonitoringService(
+                        config,
+                        workspace_factory,
+                        client,
+                        snapshot,
+                        alerts=alerts,
+                        poll_slots=slots,
+                    )
+
+                registry = ConnectionRegistry(
+                    read_enabled,
+                    build_worker,
+                    reconcile_seconds=config.connection_reconcile_seconds,
+                    concurrency=config.connection_poll_concurrency,
                 )
+                registry_holder["registry"] = registry
+                app.state.connections.drain = registry.drain
+                app.state.registry = registry
+
                 if config.demo_mode:
-                    with integration_factory() as session:
+                    with WorkspaceFactory(factory, DEMO_WORKSPACE_ID)() as session:
+                        ensure_demo_instance(session)
                         failure = demo_failure()
-                        incident, _ = IncidentRepository(session).create_once(failure)
+                        incident, _ = IncidentRepository(
+                            session, DEMO_WORKSPACE_ID, DEMO_INSTANCE_ID
+                        ).create_once(failure)
                         if incident.diagnosis is None:
                             incident.diagnosis = (
-                                await app.state.provider.diagnose(failure)
+                                await MockDiagnosisProvider().diagnose(failure)
                             ).model_dump()
-                            incident.diagnosis_provider = app.state.provider.name
+                            incident.diagnosis_provider = "mock"
                             incident.status = "diagnosed"
                         session.commit()
                         app.state.demo_incident_id = incident.id
                         seed_demo_history(session, incident.id)
                         session.commit()
-                app.state.monitoring = MonitoringService(
-                    config,
-                    integration_factory,
-                    app.state.n8n,
-                    alerts=app.state.alerts,
-                )
-                await app.state.monitoring.start()
-                yield
+                else:
+                    await registry.start()
+                try:
+                    yield
+                finally:
+                    await registry.stop()
+                    for provider in providers.values():
+                        close = getattr(provider, "close", None)
+                        if callable(close):
+                            close()
         finally:
-            if app.state.monitoring is not None:
-                await app.state.monitoring.stop()
-            app.state.alerts.close()
             engine.dispose()
 
     app = FastAPI(
@@ -158,7 +200,6 @@ def create_app(
 
     @app.middleware("http")
     async def readonly_public_demo(request: Request, call_next):
-        # Visitors can browse synthetic data but cannot mutate demo state.
         if config.public_demo_readonly and request.method not in {"GET", "HEAD", "OPTIONS"}:
             return error_response("demo_readonly", "Public demo is read-only", 403)
         return await call_next(request)
@@ -192,7 +233,6 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
-        # Validation details can echo sensitive user input; expose a fixed message.
         return error_response("validation_error", "Invalid request parameters", 422)
 
     @app.exception_handler(HTTPException)
@@ -223,7 +263,6 @@ def create_app(
             status: {"model": ErrorResponse} for status in (401, 404, 422, 500, 502, 503, 504)
         },
     )
-    # Handle browser preflight before bearer checks and add CORS to safe errors.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[

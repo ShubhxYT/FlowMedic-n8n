@@ -4,7 +4,6 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.core.config import Settings
 from app.core.errors import ServiceError
 
 
@@ -43,15 +42,16 @@ def is_failed(execution: Execution) -> bool:
 
 
 class N8nClient:
-    def __init__(self, settings: Settings, outbound, guard=None):
-        self.settings = settings
+    def __init__(self, snapshot, outbound, guard=None):
+        self.snapshot = snapshot
         self.outbound = outbound
         self.guard = guard
 
     async def _get(self, path, schema, params=None):
-        if not self.settings.n8n_base_url or not self.settings.n8n_api_key.get_secret_value():
-            raise ServiceError("n8n_not_configured", "Configure N8N_BASE_URL and N8N_API_KEY", 503)
-        base = self.settings.n8n_base_url
+        base = self.snapshot.base_url
+        key = self.snapshot.api_key.get_secret_value()
+        if not base or not key:
+            raise ServiceError("n8n_not_configured", "This n8n connection is not configured", 503)
         if not base.endswith("/api/v1"):
             base += "/api/v1"
         try:
@@ -59,7 +59,7 @@ class N8nClient:
                 base,
                 path,
                 params=params,
-                headers={"X-N8N-API-KEY": self.settings.n8n_api_key.get_secret_value()},
+                headers={"X-N8N-API-KEY": key},
                 guard=self.guard,
             )
             if response.status_code in {401, 403}:

@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from auth_support import legacy_factory
+from connection_support import provision, snapshot
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -17,6 +18,8 @@ from app.services.monitoring import MonitoringService
 def history(execution_id, started, recorded, success):
     return ExecutionHistory(
         source="n8n",
+        workspace_id=snapshot().workspace_id,
+        instance_id=snapshot().id,
         workflow_id="w",
         workflow_name="Workflow",
         execution_id=execution_id,
@@ -48,7 +51,10 @@ def test_monitoring_updates_running_execution_and_sanitizes_name():
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
-    service = MonitoringService(settings, factory, None)
+    service = MonitoringService(
+        settings, factory, None, provision(factory, api_key=settings.n8n_api_key.get_secret_value())
+    )
+    assert service._acquire_lease()
     try:
         execution = Execution(
             id="1", workflowId="w", status="running", workflowData={"name": "token=test-secret"}
@@ -103,7 +109,13 @@ def test_workflow_names_are_redacted_before_history_persistence():
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
     try:
-        service = MonitoringService(settings, factory, None)
+        service = MonitoringService(
+            settings,
+            factory,
+            None,
+            provision(factory, api_key=settings.n8n_api_key.get_secret_value()),
+        )
+        assert service._acquire_lease()
         service._persist_entries(
             [
                 Execution(

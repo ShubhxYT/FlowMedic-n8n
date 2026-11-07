@@ -2,6 +2,7 @@ import asyncio
 from datetime import timedelta
 
 from auth_support import legacy_factory
+from connection_support import provision
 from sqlalchemy import create_engine, inspect, select
 
 from app.core.config import Settings
@@ -58,7 +59,7 @@ def service_with_database(tmp_path, n8n):
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
-    return MonitoringService(settings, factory, n8n), factory
+    return MonitoringService(settings, factory, n8n, provision(factory)), factory
 
 
 def test_fresh_poll_finds_new_execution_while_backfill_is_pending(tmp_path):
@@ -101,30 +102,32 @@ def test_repeated_fresh_pages_do_not_duplicate_history(tmp_path):
 def test_database_lease_contends_and_recovers_after_expiry(tmp_path):
     n8n = FreshThenBackfillN8n()
     first, factory = service_with_database(tmp_path, n8n)
-    second = MonitoringService(first.settings, factory, n8n)
+    second = MonitoringService(first.settings, factory, n8n, first.snapshot)
 
     with factory() as session:
-        repository = MonitoringRepository(session)
-        acquired, recovered = repository.acquire_lease("n8n", "default", first._owner_id, 120)
+        repository = MonitoringRepository(session, factory.workspace_id, first.instance_id)
+        acquired, recovered = repository.acquire_lease("n8n", first._owner_id, 120)
         assert acquired is True
         assert recovered is False
 
     with factory() as session:
-        acquired, recovered = MonitoringRepository(session).acquire_lease(
-            "n8n", "default", second._owner_id, 120
-        )
+        acquired, recovered = MonitoringRepository(
+            session, factory.workspace_id, first.instance_id
+        ).acquire_lease("n8n", second._owner_id, 120)
         assert acquired is False
         assert recovered is False
 
     with factory() as session:
-        checkpoint = MonitoringRepository(session).checkpoint("n8n", "default")
+        checkpoint = MonitoringRepository(
+            session, factory.workspace_id, first.instance_id
+        ).checkpoint("n8n")
         checkpoint.lease_expires_at = utc_now() - timedelta(seconds=1)
         session.commit()
 
     with factory() as session:
-        acquired, recovered = MonitoringRepository(session).acquire_lease(
-            "n8n", "default", second._owner_id, 120
-        )
+        acquired, recovered = MonitoringRepository(
+            session, factory.workspace_id, first.instance_id
+        ).acquire_lease("n8n", second._owner_id, 120)
         assert acquired is True
         assert recovered is True
 
@@ -137,6 +140,7 @@ def test_retention_removes_only_old_history_and_health_uses_retained_window(tmp_
         with factory() as session:
             incident = Incident(
                 id="retained-incident",
+                instance_id=service.instance_id,
                 execution_id="failed-old",
                 workflow_id="workflow",
                 workflow_name="Workflow",
@@ -154,6 +158,7 @@ def test_retention_removes_only_old_history_and_health_uses_retained_window(tmp_
             session.add(
                 ExecutionHistory(
                     source="n8n",
+                    instance_id=service.instance_id,
                     workflow_id="workflow",
                     workflow_name="Workflow",
                     execution_id="failed-old",

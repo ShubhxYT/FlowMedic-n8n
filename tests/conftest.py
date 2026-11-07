@@ -2,7 +2,7 @@ import copy
 
 import httpx
 import pytest
-from auth_support import OperatorClient
+from connection_support import ManagedClient as OperatorClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -65,3 +65,18 @@ def client(execution):
     )
     with OperatorClient(create_app(settings, n8n_transport=httpx.MockTransport(handler))) as result:
         yield result
+
+
+@pytest.fixture(autouse=True)
+def mock_example_dns(monkeypatch):
+    """Mock transports still exercise destination validation without external DNS."""
+    import socket
+
+    resolve = socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host in {"n8n.example", "example.com", "api.openai.com"}:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+        return resolve(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)

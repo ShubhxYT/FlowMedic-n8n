@@ -159,7 +159,9 @@ def test_upgrade_preserves_every_existing_value_and_relation(tmp_path):
             "CREATE UNIQUE INDEX ix_incidents_execution_id ON incidents(execution_id)"
         )
     before = snapshot(engine)
-    upgrade_database(url)
+    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0004_workspace_auth")
     after = snapshot(engine)
     for name, rows in before.items():
         assert len(after[name]) == len(rows)

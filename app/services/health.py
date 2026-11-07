@@ -7,6 +7,7 @@ from app.schemas.domain import WorkflowHealth
 
 RECENT_EXECUTIONS_PER_WORKFLOW = 20
 RECENT_EXECUTIONS_GLOBAL = 100
+Scope = tuple[str, str, str]
 
 
 def as_utc(value: datetime) -> datetime:
@@ -16,6 +17,10 @@ def as_utc(value: datetime) -> datetime:
 def execution_time(item: ExecutionHistory) -> datetime:
     # Backfilled executions arrive later but must not displace newer executions.
     return as_utc(item.started_at or item.stopped_at or item.recorded_at)
+
+
+def scope_of(item) -> Scope:
+    return (item.workspace_id, item.instance_id, item.workflow_id)
 
 
 @dataclass(frozen=True)
@@ -51,16 +56,16 @@ def _latest(values: list[ExecutionHistory], success: bool) -> datetime | None:
 def build_workflow_health(
     history: list[ExecutionHistory], incidents: list[Incident]
 ) -> list[WorkflowHealth]:
-    by_workflow: dict[str, list[ExecutionHistory]] = defaultdict(list)
+    by_workflow: dict[Scope, list[ExecutionHistory]] = defaultdict(list)
     for item in history:
-        by_workflow[item.workflow_id].append(item)
-    open_counts: dict[str, int] = defaultdict(int)
+        by_workflow[scope_of(item)].append(item)
+    open_counts: dict[Scope, int] = defaultdict(int)
     for incident in incidents:
         if incident.status == "open":
-            open_counts[incident.workflow_id] += 1
+            open_counts[scope_of(incident)] += 1
 
     result = []
-    for workflow_id, values in by_workflow.items():
+    for (workspace_id, instance_id, workflow_id), values in by_workflow.items():
         recent = sorted(values, key=execution_time, reverse=True)[:RECENT_EXECUTIONS_PER_WORKFLOW]
         success_count = sum(item.is_success is True for item in recent)
         failure_count = sum(item.is_success is False for item in recent)
@@ -69,7 +74,7 @@ def build_workflow_health(
             execution_count=len(recent),
             success_count=success_count,
             failure_count=failure_count,
-            open_incident_count=open_counts[workflow_id],
+            open_incident_count=open_counts[(workspace_id, instance_id, workflow_id)],
         )
         newest = recent[0]
         known_names = [
@@ -77,6 +82,8 @@ def build_workflow_health(
         ]
         result.append(
             WorkflowHealth(
+                workspace_id=workspace_id,
+                instance_id=instance_id,
                 workflow_id=workflow_id,
                 workflow_name=known_names[0] if known_names else newest.workflow_name,
                 health=classify_health(counts),
@@ -87,14 +94,24 @@ def build_workflow_health(
                 recent_success_count=success_count,
                 recent_failure_count=failure_count,
                 success_rate=success_count / classified if classified else None,
-                open_incident_count=open_counts[workflow_id],
+                open_incident_count=open_counts[(workspace_id, instance_id, workflow_id)],
             )
         )
-    return sorted(result, key=lambda item: (item.health == "unknown", item.workflow_name.lower()))
+    return sorted(
+        result,
+        key=lambda item: (item.health == "unknown", item.workflow_name.lower(), item.instance_id),
+    )
 
 
 def global_recent_counts(history: list[ExecutionHistory]) -> tuple[int, int]:
-    recent = sorted(history, key=execution_time, reverse=True)[:RECENT_EXECUTIONS_GLOBAL]
+    by_instance = defaultdict(list)
+    for item in history:
+        by_instance[(item.workspace_id, item.instance_id)].append(item)
+    recent = [
+        item
+        for values in by_instance.values()
+        for item in sorted(values, key=execution_time, reverse=True)[:RECENT_EXECUTIONS_GLOBAL]
+    ]
     return (
         sum(item.is_success is True for item in recent),
         sum(item.is_success is False for item in recent),

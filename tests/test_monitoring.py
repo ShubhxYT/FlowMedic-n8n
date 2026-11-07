@@ -3,7 +3,9 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
-from auth_support import OperatorClient, legacy_factory
+from auth_support import legacy_factory
+from connection_support import ManagedClient as OperatorClient
+from connection_support import provision, snapshot
 from sqlalchemy import create_engine, inspect, text
 
 from app.core.config import Settings
@@ -19,12 +21,8 @@ from app.services.monitoring import MonitoringService
 def test_monitoring_is_disabled_without_n8n_configuration():
     settings = Settings(_env_file=None, database_url="sqlite:///:memory:")
     with OperatorClient(create_app(settings)) as client:
-        status = client.get("/api/v1/monitoring/status").json()
-        assert status["enabled"] is False
-        assert status["state"] == "disabled"
-        assert status["lease_state"] == "unclaimed"
-        assert status["retention_days"] == 30
-        assert client.post("/api/v1/monitoring/sync").json()["status"] == "disabled"
+        assert client.get("/api/v1/monitoring/status").json() == {"items": []}
+        assert client.post("/api/v1/monitoring/sync").status_code == 422
 
 
 def test_monitoring_background_task_starts_once_and_stops_cleanly(execution):
@@ -39,41 +37,54 @@ def test_monitoring_background_task_starts_once_and_stops_cleanly(execution):
         monitor_poll_interval_seconds=60,
     )
     app = create_app(settings, n8n_transport=httpx.MockTransport(handler))
-    with OperatorClient(app):
-        task = app.state.monitoring._task
+    with OperatorClient(app) as client:
+        worker = app.state.registry.get(
+            client.app.state.registry.read_enabled()[0].workspace_id, client.instance_id
+        )
+        task = worker._task
         assert task is not None
-        assert task.get_name() == "flowmedic-monitor"
-    assert app.state.monitoring._task is None
+        assert task.get_name() == f"flowmedic-monitor-{client.instance_id}"
+    assert worker._task is None
 
 
 def test_manual_monitoring_sync_persists_history_checkpoint_and_incident(client):
-    status = client.get("/api/v1/monitoring/status").json()
+    status = client.get("/api/v1/monitoring/status").json()["items"][0]
     assert status["enabled"] is True
     assert status["state"] == "idle"
 
-    first = client.post("/api/v1/monitoring/sync").json()
+    first = client.post(
+        "/api/v1/monitoring/sync", params={"instance_id": client.instance_id}
+    ).json()
     assert first == {
         "status": "completed",
+        "workspace_id": status["workspace_id"],
+        "instance_id": client.instance_id,
         "executions_discovered": 1,
         "history_records_created": 1,
         "incidents_created": 1,
         "next_cursor": "next-page",
     }
-    second = client.post("/api/v1/monitoring/sync").json()
+    second = client.post(
+        "/api/v1/monitoring/sync", params={"instance_id": client.instance_id}
+    ).json()
     assert second["history_records_created"] == 0
     assert second["incidents_created"] == 0
     assert client.get("/api/v1/metrics/workflows").json()["data"][0]["health"] == "unhealthy"
-    overview = client.get("/api/v1/metrics/overview").json()
+    overview = client.get(
+        "/api/v1/metrics/overview", params={"instance_id": client.instance_id}
+    ).json()
     assert overview["monitored_workflow_count"] == 1
     assert overview["recent_failure_count"] == 1
     assert overview["last_successful_monitoring_sync_at"] is not None
-    hardened = client.get("/api/v1/monitoring/status").json()
+    hardened = client.get("/api/v1/monitoring/status").json()["items"][0]
     assert hardened["last_fresh_poll_at"] is not None
     assert hardened["backfill_state"] == "pending"
 
 
 def test_workflow_health_endpoint_is_safe_for_missing_history(client):
-    response = client.get("/api/v1/workflows/missing/health")
+    response = client.get(
+        "/api/v1/workflows/missing/health", params={"instance_id": client.instance_id}
+    )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "workflow_not_found"
 
@@ -113,7 +124,7 @@ def _service(fake, **settings_values):
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
-    return MonitoringService(settings, factory, fake)
+    return MonitoringService(settings, factory, fake, provision(factory))
 
 
 def test_transient_failure_retries_and_recovers():
@@ -187,6 +198,8 @@ def test_health_metrics_do_not_invent_a_success_rate():
     now = datetime(2026, 9, 10, tzinfo=UTC)
     history = [
         ExecutionHistory(
+            workspace_id=snapshot().workspace_id,
+            instance_id=snapshot().id,
             source="n8n",
             workflow_id="workflow-1",
             workflow_name="Workflow one",
@@ -211,12 +224,19 @@ def test_migration_preserves_existing_incident_table(tmp_path):
         connection.execute(
             text(
                 "CREATE TABLE incidents (id VARCHAR(36) PRIMARY KEY, "
-                "execution_id VARCHAR(255) UNIQUE)"
+                "execution_id VARCHAR(255) UNIQUE, workflow_id VARCHAR(255) NOT NULL, "
+                "workflow_name VARCHAR(1000) NOT NULL, failed_node VARCHAR(1000), "
+                "error_type VARCHAR(1000) NOT NULL, error_message TEXT NOT NULL, "
+                "execution_timestamp DATETIME, status VARCHAR(20) NOT NULL, "
+                "severity VARCHAR(20) NOT NULL, diagnosis JSON, diagnosis_provider VARCHAR(50))"
             )
         )
         connection.execute(
             text(
-                "INSERT INTO incidents (id, execution_id) VALUES ('old-incident', 'old-execution')"
+                "INSERT INTO incidents (id, execution_id, workflow_id, workflow_name, "
+                "error_type, error_message, status, severity) VALUES "
+                "('old-incident', 'old-execution', 'w', 'Workflow', "
+                "'Error', 'safe', 'open', 'high')"
             )
         )
     upgrade_database(url)

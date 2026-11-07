@@ -2,8 +2,8 @@ import asyncio
 
 import httpx
 import pytest
+from connection_support import outbound, snapshot
 
-from app.core.config import Settings
 from app.core.errors import ServiceError
 from app.integrations.n8n.client import Execution, N8nClient, is_failed
 
@@ -12,10 +12,8 @@ def run_client(handler, method="connectivity"):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             client = N8nClient(
-                Settings(
-                    _env_file=None, n8n_base_url="https://n8n.example/api/v1", n8n_api_key="key"
-                ),
-                http,
+                snapshot(),
+                outbound(http),
             )
             return await getattr(client, method)()
 
@@ -52,7 +50,7 @@ def test_legacy_failure_requires_error():
         (500, {}, "n8n_server_error"),
         (200, {"data": "wrong"}, "n8n_malformed"),
         (200, {"unexpected": []}, "n8n_malformed"),
-        (302, {}, "n8n_http_error"),
+        (302, {}, "upstream_redirect_rejected"),
     ],
 )
 def test_invalid_responses(status, body, code):

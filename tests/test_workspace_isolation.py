@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from auth_support import ORIGIN, PASSWORD, login
+from connection_support import provision
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import aliased
@@ -51,8 +52,9 @@ def two_users():
 
 def seed(factory, wid):
     now = datetime.now(UTC)
+    instance = provision(factory, workspace_id=wid)
     with WorkspaceFactory(factory, wid)() as db:
-        incident, _ = IncidentRepository(db).create_once(
+        incident, _ = IncidentRepository(db, wid, instance.id).create_once(
             Failure(
                 execution_id="shared-execution",
                 workflow_id="shared-workflow",
@@ -77,6 +79,7 @@ def seed(factory, wid):
         event = AlertEvent(
             rule_id=rule.id,
             trigger_type="new_incident",
+            instance_id=instance.id,
             event_key="same-key",
             deduplication_key="same-key",
             incident_id=incident.id,
@@ -98,6 +101,7 @@ def seed(factory, wid):
         )
         db.add(
             ExecutionHistory(
+                instance_id=instance.id,
                 source="n8n",
                 workflow_id="shared-workflow",
                 workflow_name="Private",
@@ -110,13 +114,14 @@ def seed(factory, wid):
         )
         db.add(
             AlertConditionState(
+                instance_id=instance.id,
                 condition_type="unhealthy",
                 scope_key="shared-workflow",
                 current_state="unhealthy",
                 updated_at=now,
             )
         )
-        checkpoint = MonitoringRepository(db).checkpoint("n8n", "default")
+        checkpoint = MonitoringRepository(db, wid, instance.id).checkpoint("n8n")
         checkpoint.lease_owner_id = wid
         db.commit()
         return incident.id, rule.id, event.id
@@ -127,15 +132,15 @@ def test_two_workspace_api_matrix_and_background_scope(two_users):
     factory = owner.app.state.session_factory
     ids = seed(factory, LEGACY_WORKSPACE_ID)
     # New account cannot inherit any environment integration or records.
-    for path in ["incidents", "alerts/rules", "alerts/events", "workflows", "executions/failed"]:
+    for path in ["incidents", "alerts/rules", "alerts/events"]:
         response = other.get(f"/api/v1/{path}")
         assert response.status_code == 200, response.text
         assert response.json()["data"] == []
     assert other.get("/api/v1/metrics/overview").json()["recent_failure_count"] == 0
-    assert other.get("/api/v1/monitoring/status").json()["enabled"] is False
+    assert other.get("/api/v1/monitoring/status").json() == {"items": []}
     assert other.get("/api/v1/system/status").json()["n8n_configured"] is False
-    assert other.get("/api/v1/n8n/status").json() == {"connected": False}
-    assert other.post("/api/v1/monitoring/sync").status_code == 409
+    assert other.get("/api/v1/n8n/status").status_code == 422
+    assert other.post("/api/v1/monitoring/sync").status_code == 422
     for path in [f"incidents/{ids[0]}", f"alerts/events/{ids[2]}/deliveries"]:
         assert other.get(f"/api/v1/{path}").status_code == 404
     assert other.post(f"/api/v1/incidents/{ids[0]}/diagnose").status_code == 404
@@ -157,14 +162,16 @@ def test_two_workspace_api_matrix_and_background_scope(two_users):
             db.execute(text("SELECT * FROM incidents"))
     with WorkspaceFactory(factory, LEGACY_WORKSPACE_ID)() as db:
         assert (
-            MonitoringRepository(db).existing_checkpoint("n8n", "default").lease_owner_id
+            MonitoringRepository(db, LEGACY_WORKSPACE_ID, provision(factory).id)
+            .existing_checkpoint("n8n")
+            .lease_owner_id
             == LEGACY_WORKSPACE_ID
         )
         assert db.scalar(select(func.count()).select_from(AlertConditionState)) == 1
     with factory() as db, pytest.raises(RuntimeError):
-        IncidentRepository(db)
+        IncidentRepository(db, LEGACY_WORKSPACE_ID)
     with pytest.raises(RuntimeError):
-        AlertService(owner.app.state.settings, factory)
+        AlertService(owner.app.state.settings, factory, LEGACY_WORKSPACE_ID, provision(factory).id)
     with WorkspaceFactory(factory, person["workspace"]["id"])() as db:
         db.add(
             ExecutionHistory(

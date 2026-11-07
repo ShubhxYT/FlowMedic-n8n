@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from auth_support import OperatorClient
+from connection_support import ManagedClient as OperatorClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -11,21 +11,26 @@ def test_health(client):
 
 
 def test_n8n_status_and_workflows(client):
-    assert client.get("/api/v1/n8n/status").json() == {"connected": True}
-    response = client.get("/api/v1/workflows").json()
+    assert client.get("/api/v1/n8n/status", params={"instance_id": client.instance_id}).json() == {
+        "connected": True
+    }
+    response = client.get("/api/v1/workflows", params={"instance_id": client.instance_id}).json()
     assert response["next_cursor"] == "workflow-next"
-    assert set(response["data"][0]) == {"id", "name", "active"}
+    assert set(response["data"][0]) == {"id", "workspace_id", "instance_id", "name", "active"}
 
 
 def test_sync_deduplicates_and_diagnosis_persists(client):
     url = "/api/v1/incidents"
     assert client.get(url).json() == {"data": []}
-    assert client.post(url + "/sync").json() == {
+    assert client.post(url + "/sync", params={"instance_id": client.instance_id}).json() == {
         "scanned": 1,
         "created": 1,
         "next_cursor": "next-page",
     }
-    assert client.post(url + "/sync").json()["created"] == 0
+    assert (
+        client.post(url + "/sync", params={"instance_id": client.instance_id}).json()["created"]
+        == 0
+    )
     incident = client.get(url).json()["data"][0]
     assert incident["status"] == "open"
     result = client.post(url + "/" + incident["id"] + "/diagnose")
@@ -37,7 +42,7 @@ def test_sync_deduplicates_and_diagnosis_persists(client):
 
 
 def test_failed_endpoint_does_not_persist_or_leak(client):
-    response = client.get("/api/v1/executions/failed")
+    response = client.get("/api/v1/executions/failed", params={"instance_id": client.instance_id})
     assert response.status_code == 200
     assert response.json()["data"][0]["failed_node"] == "Fetch orders"
     for forbidden in ("private-value", "private stack", "sensitive customer", "runData"):
@@ -73,19 +78,20 @@ def test_missing_configuration():
     ) as c:
         assert c.get("/health").status_code == 200
         response = c.get("/api/v1/n8n/status")
-        assert response.status_code == 503
-        assert response.json()["error"]["code"] == "n8n_not_configured"
+        assert response.status_code == 422
 
 
 def test_system_status_and_frontend_cors():
     settings = Settings(_env_file=None, database_url="sqlite:///:memory:")
     with OperatorClient(create_app(settings)) as c:
         response = c.get("/api/v1/system/status")
-        assert response.json() == {
-            "n8n_configured": False,
-            "ai_mode": "mock",
-            "database_engine": "sqlite",
-        }
+        status = response.json()
+        assert status["n8n_configured"] is False
+        assert status["ai_mode"] == "mock"
+        assert status["ai_state"] == "not_configured"
+        assert status["enabled_n8n_count"] == 0
+        assert status["n8n_instances"] == []
+        assert status["database_engine"] == "sqlite"
         preflight = c.options(
             "/api/v1/incidents",
             headers={
@@ -141,7 +147,7 @@ def test_upstream_failure_has_safe_error():
     )
     transport = httpx.MockTransport(lambda r: httpx.Response(401, text="secret stack trace"))
     with OperatorClient(create_app(settings, n8n_transport=transport)) as c:
-        response = c.get("/api/v1/n8n/status")
+        response = c.get("/api/v1/n8n/status", params={"instance_id": c.instance_id})
         assert response.status_code == 502
         assert "secret" not in response.text
 

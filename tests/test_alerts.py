@@ -1,14 +1,13 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 from alembic.config import Config
 from auth_support import legacy_factory
+from connection_support import provision
 from sqlalchemy import MetaData, Table, inspect, select
 
 from alembic import command
-from app.api.routes import sync_incidents
 from app.core.config import Settings
 from app.core.database import create_database
 from app.core.migrations import upgrade_database
@@ -46,7 +45,8 @@ def service_with_database(tmp_path, *, provider=None, demo_mode=False, retries=3
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
-    return AlertService(settings, factory, provider), factory
+    instance = provision(factory)
+    return AlertService(settings, factory, factory.workspace_id, instance.id, provider), factory
 
 
 def add_rule(factory, *, trigger_type, enabled=True, cooldown_seconds=300):
@@ -68,6 +68,7 @@ def add_incident(factory, incident_id="incident-1", workflow_id="workflow-1"):
         session.add(
             Incident(
                 id=incident_id,
+                instance_id=provision(factory).id,
                 execution_id=f"execution-{incident_id}",
                 workflow_id=workflow_id,
                 workflow_name="Test workflow",
@@ -157,6 +158,7 @@ def test_conflicting_attempt_reservation_is_retried_without_duplicate_numbers(
         session.add(
             AlertEvent(
                 id="reservation-event",
+                instance_id=provision(factory).id,
                 rule_id=rule_id,
                 trigger_type=TRIGGER_NEW_INCIDENT,
                 event_key="reservation-event-key",
@@ -214,6 +216,7 @@ def test_state_transition_rules_only_trigger_when_state_becomes_unhealthy_or_deg
         session.add(
             ExecutionHistory(
                 source="n8n",
+                instance_id=provision(factory).id,
                 workflow_id="workflow-1",
                 workflow_name="Test workflow",
                 execution_id="history-1",
@@ -267,9 +270,11 @@ def test_manual_incident_sync_succeeds_when_alert_evaluation_fails(tmp_path):
             raise RuntimeError("alert provider unavailable")
 
     class FakeN8n:
-        async def failed_executions(self, limit, cursor):
-            return (
-                [
+        async def recent_executions(self, limit, cursor):
+            from app.integrations.n8n.client import ExecutionPage
+
+            return ExecutionPage(
+                data=[
                     Execution(
                         id="failing-sync-execution",
                         workflowId="workflow-1",
@@ -285,9 +290,11 @@ def test_manual_incident_sync_succeeds_when_alert_evaluation_fails(tmp_path):
                         },
                     )
                 ],
-                None,
-                1,
+                nextCursor=None,
             )
+
+        async def execution_details(self, execution_id):
+            return (await self.recent_executions(1, None)).data[0]
 
     settings = Settings(
         _env_file=None,
@@ -296,19 +303,13 @@ def test_manual_incident_sync_succeeds_when_alert_evaluation_fails(tmp_path):
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                settings=settings,
-                n8n=FakeN8n(),
-                alerts=FailingAlerts(),
-            )
-        )
-    )
-    with factory() as session:
-        response = asyncio.run(sync_incidents(request, session))
+    instance = provision(factory)
+    from app.services.monitoring import MonitoringService
 
-    assert response.created == 1
+    worker = MonitoringService(settings, factory, FakeN8n(), instance, alerts=FailingAlerts())
+    response = asyncio.run(worker.sync())
+
+    assert response.incidents_created == 1
     with factory() as session:
         assert len(list(session.scalars(select(Incident)))) == 1
 

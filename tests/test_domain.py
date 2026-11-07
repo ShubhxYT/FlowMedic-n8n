@@ -3,7 +3,8 @@ import asyncio
 import httpx
 import pytest
 from auth_support import legacy_factory
-from pydantic import ValidationError
+from connection_support import outbound, provision, snapshot
+from pydantic import SecretStr, ValidationError
 
 from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
 from app.core.config import Settings
@@ -51,14 +52,24 @@ def test_normalization_and_persistence(execution):
     engine, factory = create_database("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = legacy_factory(factory)
+    instance = provision(factory)
     with factory() as session:
-        incident, created = IncidentRepository(session).create_once(failure)
+        incident, created = IncidentRepository(
+            session, factory.workspace_id, instance.id
+        ).create_once(failure)
         assert created
         session.commit()
         incident_id = incident.id
     with factory() as session:
-        assert IncidentRepository(session).get(incident_id).execution_id == "42"
-        _, created = IncidentRepository(session).create_once(failure)
+        assert (
+            IncidentRepository(session, factory.workspace_id, instance.id)
+            .get(incident_id)
+            .execution_id
+            == "42"
+        )
+        _, created = IncidentRepository(session, factory.workspace_id, instance.id).create_once(
+            failure
+        )
         assert not created
     engine.dispose()
 
@@ -134,7 +145,10 @@ def test_real_provider_structured_response_and_safe_input(execution, valid):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             provider = CompatibleAIProvider(
-                Settings(_env_file=None, ai_api_key="ai-secret"), client
+                snapshot(
+                    kind="openai-compatible", model="test-model", api_key=SecretStr("ai-secret")
+                ),
+                outbound(client),
             )
             return await provider.diagnose(context)
 
