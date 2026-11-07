@@ -1,2 +1,1 @@
-# Register every model for Alembic and in-memory tests.
-from app.models import audit, auth, incident  # noqa: F401
+from app.models import audit, auth, connections, incident  # noqa: F401

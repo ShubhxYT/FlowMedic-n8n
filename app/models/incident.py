@@ -1,7 +1,17 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -11,9 +21,21 @@ class Base(DeclarativeBase):
 
 class Incident(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str] = mapped_column(String(36))
     __tablename__ = "incidents"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "execution_id", name="uq_incidents_workspace"),
+        UniqueConstraint(
+            "workspace_id",
+            "instance_id",
+            "execution_id",
+            name="uq_incidents_instance_execution",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_incidents_instance",
+        ),
+        Index("ix_incidents_instance_workflow", "workspace_id", "instance_id", "workflow_id"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     execution_id: Mapped[str] = mapped_column(String(255), index=True)
@@ -31,10 +53,16 @@ class Incident(Base):
 
 class MonitoringCheckpoint(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str] = mapped_column(String(36))
     __tablename__ = "monitoring_checkpoints"
     __table_args__ = (
         UniqueConstraint(
-            "workspace_id", "source", "source_identifier", name="uq_checkpoint_workspace"
+            "workspace_id", "instance_id", "source", name="uq_checkpoint_instance"
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_checkpoints_instance",
         ),
     )
 
@@ -64,9 +92,28 @@ class MonitoringCheckpoint(Base):
 
 class ExecutionHistory(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str] = mapped_column(String(36))
     __tablename__ = "execution_history"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "source", "execution_id", name="uq_history_workspace"),
+        UniqueConstraint(
+            "workspace_id",
+            "instance_id",
+            "source",
+            "execution_id",
+            name="uq_history_instance",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_history_instance",
+        ),
+        Index(
+            "ix_history_instance_workflow",
+            "workspace_id",
+            "instance_id",
+            "workflow_id",
+            "recorded_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -84,8 +131,16 @@ class ExecutionHistory(Base):
 
 class AlertRule(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str | None] = mapped_column(String(36))
     __tablename__ = "alert_rules"
-    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_rule_workspace"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_rule_workspace"),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_rules_instance",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(255))
@@ -99,8 +154,23 @@ class AlertRule(Base):
 
 class AlertEvent(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str] = mapped_column(String(36))
     __tablename__ = "alert_events"
-    __table_args__ = (UniqueConstraint("workspace_id", "event_key", name="uq_event_workspace"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "event_key", name="uq_event_workspace"),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_events_instance",
+        ),
+        Index(
+            "ix_events_instance_workflow",
+            "workspace_id",
+            "instance_id",
+            "workflow_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     rule_id: Mapped[str] = mapped_column(ForeignKey("alert_rules.id"), index=True)
@@ -132,10 +202,20 @@ class AlertDeliveryAttempt(Base):
 
 class AlertConditionState(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    instance_id: Mapped[str] = mapped_column(String(36))
     __tablename__ = "alert_condition_states"
     __table_args__ = (
         UniqueConstraint(
-            "workspace_id", "condition_type", "scope_key", name="uq_condition_workspace"
+            "workspace_id",
+            "instance_id",
+            "condition_type",
+            "scope_key",
+            name="uq_condition_instance",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "instance_id"],
+            ["n8n_instances.workspace_id", "n8n_instances.id"],
+            name="fk_conditions_instance",
         ),
     )
 

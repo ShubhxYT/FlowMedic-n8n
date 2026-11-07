@@ -1,4 +1,5 @@
-from typing import Annotated
+from dataclasses import dataclass
+from typing import Annotated, Literal
 
 from fastapi import Depends, Request
 
@@ -37,3 +38,31 @@ def admin_context(context: Context):
 
 
 Admin = Annotated[AuthContext, Depends(admin_context)]
+
+
+@dataclass(frozen=True)
+class WorkspaceContext:
+    """Integration surface for feature routers built on the authentication module."""
+
+    workspace_id: str
+    user_id: str
+    role: Literal["admin", "viewer"]
+
+
+def get_workspace_context(context: Context) -> WorkspaceContext:
+    """Return the verified session/workspace selection as an immutable value."""
+    role = context.role if context.role in {"admin", "viewer"} else "viewer"
+    return WorkspaceContext(
+        workspace_id=context.workspace_id,
+        user_id=context.user_id or "",
+        role=role,
+    )
+
+
+def require_admin(
+    context: Annotated[WorkspaceContext, Depends(get_workspace_context)],
+) -> WorkspaceContext:
+    """Reject viewers; mutations already passed CSRF/origin checks in current_context."""
+    if context.role != "admin":
+        raise ServiceError("forbidden", "Workspace admin permission is required", 403)
+    return context

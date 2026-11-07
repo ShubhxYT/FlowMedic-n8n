@@ -1,3 +1,4 @@
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -39,6 +40,14 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = None
     alert_webhook_timeout_seconds: float = Field(default=5, gt=0, le=15)
     alert_webhook_signing_secret: SecretStr = SecretStr("")
+    connection_encryption_keys: SecretStr = SecretStr("")
+    connection_active_key_id: str = Field(default="", max_length=64)
+    connection_reconcile_seconds: float = Field(default=5, ge=1, le=60)
+    connection_poll_concurrency: int = Field(default=4, ge=1, le=16)
+    outbound_destinations: str = "[]"
+    outbound_allow_local_http: bool = False
+    outbound_egress_enforced: bool = False
+    deployment_environment: Literal["development", "production"] = "production"
 
     @field_validator("n8n_base_url", "ai_base_url")
     @classmethod

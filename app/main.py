@@ -14,6 +14,7 @@ from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.core.config import Settings
 from app.core.database import create_database
+from app.core.encryption import ConnectionCipher
 from app.core.errors import ServiceError
 from app.core.migrations import upgrade_database
 from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
@@ -21,6 +22,7 @@ from app.demo import demo_failure, seed_demo_history
 from app.integrations.n8n.client import N8nClient
 from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID
 from app.models.incident import Base
+from app.repositories.connections import verify_keyring_startup
 from app.repositories.incidents import IncidentRepository
 from app.schemas.domain import ErrorResponse
 from app.services.alerts import (
@@ -58,6 +60,12 @@ def create_app(
             upgrade_database(config.database_url)
             engine, factory = create_database(config.database_url)
         ensure_reserved_workspaces(factory)
+        cipher = None
+        keys = config.connection_encryption_keys.get_secret_value()
+        if not config.demo_mode and keys:
+            cipher = ConnectionCipher(keys, config.connection_active_key_id)
+        verify_keyring_startup(factory, cipher, demo_mode=config.demo_mode)
+        app.state.connection_cipher = cipher
         app.state.session_factory = factory
         integration_factory = WorkspaceFactory(
             factory, DEMO_WORKSPACE_ID if config.demo_mode else LEGACY_WORKSPACE_ID
