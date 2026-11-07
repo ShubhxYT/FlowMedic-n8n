@@ -61,6 +61,31 @@ def test_normalization_and_persistence(execution):
     engine.dispose()
 
 
+def test_code_node_error_type_falls_back_to_description(execution):
+    # n8n Code-node errors have no "name" key; the class lives in "description".
+    execution["data"]["resultData"]["error"] = {
+        "description": "ReferenceError",
+        "message": "foo is not defined [line 3]",
+        "lineNumber": 3,
+        "level": "warning",
+        "stack": "private stack",
+    }
+    failure = normalize(Execution.model_validate(execution))
+    assert failure.error_type == "ReferenceError"
+
+
+def test_error_name_takes_precedence_over_description(execution):
+    execution["data"]["resultData"]["error"]["description"] = "ReferenceError"
+    failure = normalize(Execution.model_validate(execution))
+    assert failure.error_type == "NodeApiError"
+
+
+def test_error_type_unknown_without_name_or_description(execution):
+    execution["data"]["resultData"]["error"] = {"message": "boom"}
+    failure = normalize(Execution.model_validate(execution))
+    assert failure.error_type == "UnknownError"
+
+
 def test_incomplete_crash_and_success_rejection():
     failure = normalize(Execution(id="1", workflowId="w", status="crashed"))
     assert failure.severity == "high"
