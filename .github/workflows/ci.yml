@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 concurrency:
@@ -11,10 +11,11 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     strategy:
-      fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
     steps:
@@ -23,13 +24,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest -q
-
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m ruff check .
+      - name: File-backed fresh and legacy migration smoke
+        run: python -m pytest -q tests/test_auth_migrations.py
+      - run: python -m pytest -q
   frontend:
-    name: Frontend
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -48,13 +49,12 @@ jobs:
       - run: npm run build
         env:
           NEXT_PUBLIC_API_BASE_URL: /api/backend
-
   images:
-    name: Docker images
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
-      - name: Build backend image
-        run: docker build -t flowmedic-api:ci .
-      - name: Build dashboard image
-        run: docker build -t flowmedic-dashboard:ci --build-arg NEXT_PUBLIC_API_BASE_URL=/api/backend ./frontend
+      - run: docker build -t flowmedic-api:ci .
+      - run: docker build -t flowmedic-dashboard:ci --build-arg NEXT_PUBLIC_API_BASE_URL=/api/backend ./frontend

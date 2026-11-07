@@ -4,7 +4,6 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.core.config import Settings
 from app.core.errors import ServiceError
 
 
@@ -86,31 +85,36 @@ def is_failed(
 
 
 class N8nClient:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient):
-        self.settings = settings
-        self.client = client
+    def __init__(self, snapshot, outbound, guard=None):
+        self.snapshot = snapshot
+        self.outbound = outbound
+        self.guard = guard
 
     async def _get(self, path, schema, params=None):
-        if not self.settings.n8n_base_url or not self.settings.n8n_api_key.get_secret_value():
-            raise ServiceError("n8n_not_configured", "Configure N8N_BASE_URL and N8N_API_KEY", 503)
-        base = self.settings.n8n_base_url
+        base = self.snapshot.base_url
+        key = self.snapshot.api_key.get_secret_value()
+        if not base or not key:
+            raise ServiceError("n8n_not_configured", "This n8n connection is not configured", 503)
         if not base.endswith("/api/v1"):
             base += "/api/v1"
         try:
-            response = await self.client.get(
-                base + path,
+            response = await self.outbound.get(
+                base,
+                path,
                 params=params,
-                headers={"X-N8N-API-KEY": self.settings.n8n_api_key.get_secret_value()},
-                timeout=self.settings.request_timeout,
+                headers={"X-N8N-API-KEY": key},
+                guard=self.guard,
             )
             if response.status_code in {401, 403}:
                 raise ServiceError("n8n_auth_failed", "n8n rejected the configured credentials")
             response.raise_for_status()
             return schema.model_validate(response.json())
-        except httpx.TimeoutException:
-            raise ServiceError("n8n_timeout", "n8n request timed out", 504) from None
-        except httpx.RequestError:
-            raise ServiceError("n8n_unreachable", "Unable to reach n8n", 503) from None
+        except ServiceError as exc:
+            if exc.code == "upstream_timeout":
+                raise ServiceError("n8n_timeout", "n8n request timed out", 504) from None
+            if exc.code == "upstream_unreachable":
+                raise ServiceError("n8n_unreachable", "Unable to reach n8n", 503) from None
+            raise
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 raise ServiceError(

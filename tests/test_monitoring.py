@@ -3,7 +3,9 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
-from fastapi.testclient import TestClient
+from auth_support import legacy_factory
+from connection_support import ManagedClient as OperatorClient
+from connection_support import provision, snapshot
 from sqlalchemy import create_engine, inspect, text
 
 from app.core.config import Settings
@@ -16,24 +18,11 @@ from app.services.health import HealthCounts, build_workflow_health, classify_he
 from app.services.monitoring import MonitoringService
 
 
-def test_monitoring_is_disabled_without_n8n_configuration(monkeypatch):
-    monkeypatch.delenv("N8N_BASE_URL", raising=False)
-    monkeypatch.delenv("N8N_API_KEY", raising=False)
-
-    settings = Settings(
-        _env_file=None,
-        database_url="sqlite:///:memory:",
-    )
-
-    with TestClient(create_app(settings)) as client:
-        status = client.get("/api/v1/monitoring/status").json()
-
-        assert status["enabled"] is False
-        assert status["state"] == "disabled"
-        assert status["lease_state"] == "unclaimed"
-        assert status["retention_days"] == 30
-
-        assert client.post("/api/v1/monitoring/sync").json()["status"] == "disabled"
+def test_monitoring_is_disabled_without_n8n_configuration():
+    settings = Settings(_env_file=None, database_url="sqlite:///:memory:")
+    with OperatorClient(create_app(settings)) as client:
+        assert client.get("/api/v1/monitoring/status").json() == {"items": []}
+        assert client.post("/api/v1/monitoring/sync").status_code == 422
 
 
 def test_monitoring_background_task_starts_once_and_stops_cleanly(execution):
@@ -48,41 +37,54 @@ def test_monitoring_background_task_starts_once_and_stops_cleanly(execution):
         monitor_poll_interval_seconds=60,
     )
     app = create_app(settings, n8n_transport=httpx.MockTransport(handler))
-    with TestClient(app):
-        task = app.state.monitoring._task
+    with OperatorClient(app) as client:
+        worker = app.state.registry.get(
+            client.app.state.registry.read_enabled()[0].workspace_id, client.instance_id
+        )
+        task = worker._task
         assert task is not None
-        assert task.get_name() == "flowmedic-monitor"
-    assert app.state.monitoring._task is None
+        assert task.get_name() == f"flowmedic-monitor-{client.instance_id}"
+    assert worker._task is None
 
 
 def test_manual_monitoring_sync_persists_history_checkpoint_and_incident(client):
-    status = client.get("/api/v1/monitoring/status").json()
+    status = client.get("/api/v1/monitoring/status").json()["items"][0]
     assert status["enabled"] is True
     assert status["state"] == "idle"
 
-    first = client.post("/api/v1/monitoring/sync").json()
+    first = client.post(
+        "/api/v1/monitoring/sync", params={"instance_id": client.instance_id}
+    ).json()
     assert first == {
         "status": "completed",
+        "workspace_id": status["workspace_id"],
+        "instance_id": client.instance_id,
         "executions_discovered": 1,
         "history_records_created": 1,
         "incidents_created": 1,
         "next_cursor": "next-page",
     }
-    second = client.post("/api/v1/monitoring/sync").json()
+    second = client.post(
+        "/api/v1/monitoring/sync", params={"instance_id": client.instance_id}
+    ).json()
     assert second["history_records_created"] == 0
     assert second["incidents_created"] == 0
     assert client.get("/api/v1/metrics/workflows").json()["data"][0]["health"] == "unhealthy"
-    overview = client.get("/api/v1/metrics/overview").json()
+    overview = client.get(
+        "/api/v1/metrics/overview", params={"instance_id": client.instance_id}
+    ).json()
     assert overview["monitored_workflow_count"] == 1
     assert overview["recent_failure_count"] == 1
     assert overview["last_successful_monitoring_sync_at"] is not None
-    hardened = client.get("/api/v1/monitoring/status").json()
+    hardened = client.get("/api/v1/monitoring/status").json()["items"][0]
     assert hardened["last_fresh_poll_at"] is not None
     assert hardened["backfill_state"] == "pending"
 
 
 def test_workflow_health_endpoint_is_safe_for_missing_history(client):
-    response = client.get("/api/v1/workflows/missing/health")
+    response = client.get(
+        "/api/v1/workflows/missing/health", params={"instance_id": client.instance_id}
+    )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "workflow_not_found"
 
@@ -121,7 +123,8 @@ def _service(fake, **settings_values):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
-    return MonitoringService(settings, factory, fake)
+    factory = legacy_factory(factory)
+    return MonitoringService(settings, factory, fake, provision(factory))
 
 
 def test_transient_failure_retries_and_recovers():
@@ -195,6 +198,8 @@ def test_health_metrics_do_not_invent_a_success_rate():
     now = datetime(2026, 9, 10, tzinfo=UTC)
     history = [
         ExecutionHistory(
+            workspace_id=snapshot().workspace_id,
+            instance_id=snapshot().id,
             source="n8n",
             workflow_id="workflow-1",
             workflow_name="Workflow one",
@@ -219,12 +224,19 @@ def test_migration_preserves_existing_incident_table(tmp_path):
         connection.execute(
             text(
                 "CREATE TABLE incidents (id VARCHAR(36) PRIMARY KEY, "
-                "execution_id VARCHAR(255) UNIQUE)"
+                "execution_id VARCHAR(255) UNIQUE, workflow_id VARCHAR(255) NOT NULL, "
+                "workflow_name VARCHAR(1000) NOT NULL, failed_node VARCHAR(1000), "
+                "error_type VARCHAR(1000) NOT NULL, error_message TEXT NOT NULL, "
+                "execution_timestamp DATETIME, status VARCHAR(20) NOT NULL, "
+                "severity VARCHAR(20) NOT NULL, diagnosis JSON, diagnosis_provider VARCHAR(50))"
             )
         )
         connection.execute(
             text(
-                "INSERT INTO incidents (id, execution_id) VALUES ('old-incident', 'old-execution')"
+                "INSERT INTO incidents (id, execution_id, workflow_id, workflow_name, "
+                "error_type, error_message, status, severity) VALUES "
+                "('old-incident', 'old-execution', 'w', 'Workflow', "
+                "'Error', 'safe', 'open', 'high')"
             )
         )
     upgrade_database(url)
@@ -288,3 +300,133 @@ def test_monitoring_task_can_be_restarted_after_it_ends():
         await service.stop()
 
     asyncio.run(run())
+
+def test_successful_executions_use_resolved_workflow_names():
+    from app.integrations.n8n.client import (
+        Execution,
+        ExecutionPage,
+        N8nWorkflow,
+        N8nWorkflowPage,
+    )
+
+    class NamedN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[
+                    Execution(id="1", workflowId="wf-1", status="success"),
+                    Execution(id="2", workflowId="wf-2", status="success"),
+                ],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            raise AssertionError("No detail request expected for successful executions")
+
+        async def workflows(self, limit=50, cursor=None):
+            return N8nWorkflowPage(
+                data=[
+                    N8nWorkflow(id="wf-1", name="Real Workflow One", active=True),
+                    N8nWorkflow(id="wf-2", name="Real Workflow Two", active=False),
+                ],
+                nextCursor=None,
+            )
+
+    async def run():
+        service = _service(NamedN8n())
+        await service.sync()
+        return service
+
+    service = asyncio.run(run())
+    with service.session_factory() as session:
+        names = {
+            row.execution_id: row.workflow_name for row in session.query(ExecutionHistory).all()
+        }
+    assert names == {"1": "Real Workflow One", "2": "Real Workflow Two"}
+
+
+def test_workflow_name_lookup_failure_does_not_break_sync():
+    from app.integrations.n8n.client import Execution, ExecutionPage
+
+    class BrokenNamesN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[Execution(id="1", workflowId="wf-1", status="success")],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            raise AssertionError("No detail request expected")
+
+        async def workflows(self, limit=50, cursor=None):
+            raise ServiceError("n8n_server_error", "listing unavailable", 503)
+
+    async def run():
+        service = _service(BrokenNamesN8n())
+        await service.sync()
+        return service
+
+    service = asyncio.run(run())
+    with service.session_factory() as session:
+        row = session.query(ExecutionHistory).one()
+    assert row.workflow_name == "Unknown workflow"
+
+
+def test_missing_execution_detail_does_not_abort_mixed_fresh_page(monkeypatch):
+    from unittest.mock import Mock
+
+    from sqlalchemy import select
+
+    from app.integrations.n8n.client import Execution, ExecutionPage
+    from app.models.incident import Incident
+
+    class MixedPageN8n:
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[
+                    Execution(id="gone", workflowId="wf-1", status="error"),
+                    Execution(id="failed", workflowId="wf-1", status="error"),
+                    Execution(id="healthy", workflowId="wf-1", status="success"),
+                ],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            if execution_id == "gone":
+                raise ServiceError("n8n_http_error", "n8n returned an unsuccessful response", 404)
+            return Execution(
+                id=execution_id,
+                workflowId="wf-1",
+                status="error",
+            )
+
+    async def run():
+        service = _service(MixedPageN8n())
+        result = await service.sync()
+        assert result.status == "completed"
+        assert result.executions_discovered == 3
+        assert result.history_records_created == 3
+        assert result.incidents_created == 1
+
+        with service.session_factory() as session:
+            history = {
+                item.execution_id: item for item in session.scalars(select(ExecutionHistory)).all()
+            }
+            incidents = session.scalars(select(Incident)).all()
+
+        assert set(history) == {"gone", "failed", "healthy"}
+        assert history["gone"].execution_status is None
+        assert history["gone"].is_success is None
+        assert history["gone"].incident_id is None
+        assert history["healthy"].execution_status == "success"
+        assert len(incidents) == 1
+        assert incidents[0].execution_id == "failed"
+
+    warning = Mock()
+    monkeypatch.setattr("app.services.monitoring.logger.warning", warning)
+    asyncio.run(run())
+    warning.assert_any_call(
+        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+        "gone",
+        404,
+    )
+    assert all("payload" not in str(call).lower() for call in warning.call_args_list)

@@ -1,5 +1,7 @@
 "use client";
 
+import { useConnectionScope } from "@/components/connection-scope";
+
 import { PageHeader } from "@/components/page-header";
 import { StatePanel } from "@/components/state-panel";
 import { Timestamp } from "@/components/timestamp";
@@ -19,8 +21,9 @@ const deliveryTone = {
 };
 
 export default function AlertsPage() {
-  const rules = useApi(() => api.alertRules());
-  const events = useApi(() => api.alertEvents());
+  const {workspaceId, instanceId, instances} = useConnectionScope();
+  const rules = useApi(() => api.alertRules(), `${workspaceId}:rules`);
+  const events = useApi(() => api.alertEvents(instanceId), `${workspaceId}:${instanceId ?? "all"}:events`);
   const error = rules.error ?? events.error;
 
   return (
@@ -54,7 +57,7 @@ export default function AlertsPage() {
             {(events.data?.data.length ?? 0) === 0 ? (
               <StatePanel inline title="No alert events yet" message="Events appear after an enabled rule matches a new incident or state transition." />
             ) : (
-              <div className="data-table-wrap" role="region" aria-label="Alert history table" tabIndex={0}><table className="data-table"><caption className="sr-only">Alert delivery history</caption><thead><tr><th scope="col">Trigger</th><th scope="col">Target</th><th scope="col">Delivery</th><th scope="col">Created</th><th scope="col">Completed</th></tr></thead><tbody>{events.data?.data.map((event) => <tr key={event.id}><td>{labels[event.trigger_type]}</td><td>{event.incident_id ? "Incident" : event.workflow_id ?? "Monitoring"}</td><td><span className={deliveryTone[event.status]}>{event.status}</span></td><td><Timestamp value={event.created_at} /></td><td><Timestamp value={event.delivered_at} /></td></tr>)}</tbody></table></div>
+              <div className="data-table-wrap" role="region" aria-label="Alert history table" tabIndex={0}><table className="data-table"><caption className="sr-only">Alert delivery history</caption><thead><tr><th scope="col">Trigger</th><th scope="col">Target</th><th scope="col">Delivery</th><th scope="col">Created</th><th scope="col">Completed</th></tr></thead><tbody>{events.data?.data.map((event) => <tr key={event.id}><td>{labels[event.trigger_type]}</td><td>{event.incident_id ? "Incident" : event.workflow_id ?? "Monitoring"}<span className="subtle">{instances.find(item => item.id === event.instance_id)?.name ?? event.instance_id.slice(0, 8)}</span></td><td><span className={deliveryTone[event.status]}>{event.status}</span></td><td><Timestamp value={event.created_at} /></td><td><Timestamp value={event.delivered_at} /></td></tr>)}</tbody></table></div>
             )}
           </section>
         </div>

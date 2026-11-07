@@ -7,14 +7,17 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from auth_support import legacy_factory
+from connection_support import provision
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.api.routes import create_alert_rule, sync_incidents
+from app.api.routes import create_alert_rule
 from app.core.config import Settings
 from app.core.database import create_database
 from app.core.errors import ServiceError
 from app.integrations.n8n.client import Execution
+from app.models.auth import LEGACY_WORKSPACE_ID
 from app.models.incident import AlertEvent, Base, Incident
 from app.repositories.alerts import AlertEventRepository, AlertRuleRepository
 from app.schemas.domain import AlertRuleCreate, AlertRuleOut
@@ -40,6 +43,8 @@ def service_with_webhook(
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
+    instance = provision(factory)
     provider = WebhookAlertDeliveryProvider(
         settings.alert_webhook_url,
         timeout_seconds=settings.alert_webhook_timeout_seconds,
@@ -47,7 +52,11 @@ def service_with_webhook(
         transport=httpx.MockTransport(handler),
     )
     return AlertService(
-        settings, factory, providers={"mock": MockAlertDeliveryProvider(), "webhook": provider}
+        settings,
+        factory,
+        factory.workspace_id,
+        instance.id,
+        providers={"mock": MockAlertDeliveryProvider(), "webhook": provider},
     ), factory
 
 
@@ -63,6 +72,7 @@ def add_webhook_rule(factory):
         session.add(
             Incident(
                 id="incident-webhook",
+                instance_id=provision(factory).id,
                 execution_id="execution-webhook",
                 workflow_id="workflow-webhook",
                 workflow_name="Webhook workflow",
@@ -103,6 +113,8 @@ def test_configured_https_webhook_delivers_only_minimal_payload(tmp_path):
             "created_at": body["event"]["created_at"],
             "id": body["event"]["id"],
             "incident_id": "incident-webhook",
+            "instance_id": service.instance_id,
+            "instance_name": "Test instance",
             "trigger_type": "new_incident",
             "workflow_id": "workflow-webhook",
         },
@@ -234,9 +246,14 @@ def test_webhook_rule_is_rejected_when_provider_is_not_configured(tmp_path):
     settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'api.db'}")
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
-    service = AlertService(settings, factory)
+    factory = legacy_factory(factory)
+    instance = provision(factory)
+    service = AlertService(settings, factory, factory.workspace_id, instance.id)
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings))
+        state=SimpleNamespace(auth=SimpleNamespace(workspace_id=LEGACY_WORKSPACE_ID, role="admin")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(alert_providers=service.providers, settings=settings)
+        ),
     )
     with factory() as session, pytest.raises(ServiceError) as error:
         create_alert_rule(
@@ -265,12 +282,16 @@ def test_demo_mode_never_invokes_a_configured_webhook(tmp_path):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
+    instance = provision(factory)
     provider = WebhookAlertDeliveryProvider(
         PUBLIC_WEBHOOK_URL,
         timeout_seconds=5,
         transport=httpx.MockTransport(handler),
     )
-    service = AlertService(settings, factory, providers={"webhook": provider})
+    service = AlertService(
+        settings, factory, factory.workspace_id, instance.id, providers={"webhook": provider}
+    )
     add_webhook_rule(factory)
 
     assert service.on_new_incident("incident-webhook", "workflow-webhook") == 0
@@ -287,12 +308,19 @@ def test_rule_api_exposes_provider_but_never_webhook_secret(tmp_path):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
+    instance = provision(factory)
     provider = WebhookAlertDeliveryProvider(
         PUBLIC_WEBHOOK_URL, timeout_seconds=5, signing_secret=secret
     )
-    service = AlertService(settings, factory, providers={"webhook": provider})
+    service = AlertService(
+        settings, factory, factory.workspace_id, instance.id, providers={"webhook": provider}
+    )
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings))
+        state=SimpleNamespace(auth=SimpleNamespace(workspace_id=LEGACY_WORKSPACE_ID, role="admin")),
+        app=SimpleNamespace(
+            state=SimpleNamespace(alert_providers=service.providers, settings=settings)
+        ),
     )
     with factory() as session:
         response = create_alert_rule(
@@ -319,9 +347,11 @@ def test_webhook_failure_does_not_break_committed_manual_incident_sync(tmp_path)
     add_webhook_rule(factory)
 
     class FakeN8n:
-        async def failed_executions(self, limit, cursor):
-            return (
-                [
+        async def recent_executions(self, limit, cursor):
+            from app.integrations.n8n.client import ExecutionPage
+
+            return ExecutionPage(
+                data=[
                     Execution(
                         id="sync-webhook-failure",
                         workflowId="workflow-sync",
@@ -334,19 +364,20 @@ def test_webhook_failure_does_not_break_committed_manual_incident_sync(tmp_path)
                         },
                     )
                 ],
-                None,
-                1,
+                nextCursor=None,
             )
 
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(settings=service.settings, n8n=FakeN8n(), alerts=service)
-        )
-    )
-    with factory() as session:
-        response = asyncio.run(sync_incidents(request, session))
+        async def execution_details(self, execution_id):
+            return (await self.recent_executions(1, None)).data[0]
 
-    assert response.created == 1
+    from app.services.monitoring import MonitoringService
+
+    worker = MonitoringService(
+        service.settings, factory, FakeN8n(), provision(factory), alerts=service
+    )
+    response = asyncio.run(worker.sync())
+
+    assert response.incidents_created == 1
     assert calls == 2
     with factory() as session:
         assert (

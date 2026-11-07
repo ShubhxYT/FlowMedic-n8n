@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.workspaces import require_workspace
 from app.models.incident import (
     AlertConditionState,
     AlertDeliveryAttempt,
@@ -18,26 +19,45 @@ def utc_now() -> datetime:
 
 class AlertRuleRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def list_rules(self) -> list[AlertRule]:
-        return list(self.session.scalars(select(AlertRule).order_by(AlertRule.created_at.desc())))
-
-    def get(self, rule_id: str) -> AlertRule | None:
-        return self.session.get(AlertRule, rule_id)
-
-    def enabled_for(self, trigger_type: str) -> list[AlertRule]:
         return list(
             self.session.scalars(
                 select(AlertRule)
-                .where(AlertRule.trigger_type == trigger_type, AlertRule.enabled.is_(True))
-                .order_by(AlertRule.created_at)
+                .where(AlertRule.workspace_id == self.workspace_id)
+                .order_by(AlertRule.created_at.desc())
             )
         )
 
+    def get(self, rule_id: str) -> AlertRule | None:
+        return self.session.scalar(
+            select(AlertRule).where(
+                AlertRule.workspace_id == self.workspace_id, AlertRule.id == rule_id
+            )
+        )
+
+    def enabled_for(self, trigger_type: str, instance_id: str | None = None) -> list[AlertRule]:
+        statement = select(AlertRule).where(
+            AlertRule.workspace_id == self.workspace_id,
+            AlertRule.trigger_type == trigger_type,
+            AlertRule.enabled.is_(True),
+        )
+        if instance_id is not None:
+            from sqlalchemy import or_
+
+            statement = statement.where(
+                or_(
+                    AlertRule.instance_id.is_(None),
+                    AlertRule.instance_id == instance_id,
+                )
+            )
+        return list(self.session.scalars(statement.order_by(AlertRule.created_at)))
+
     def create(self, **values) -> AlertRule:
         now = utc_now()
-        rule = AlertRule(created_at=now, updated_at=now, **values)
+        rule = AlertRule(workspace_id=self.workspace_id, created_at=now, updated_at=now, **values)
         self.session.add(rule)
         self.session.flush()
         return rule
@@ -52,40 +72,52 @@ class AlertRuleRepository:
 
 class AlertEventRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
-    def list_events(self, limit: int, offset: int) -> list[AlertEvent]:
+    def list_events(
+        self, limit: int, offset: int, instance_id: str | None = None
+    ) -> list[AlertEvent]:
+        statement = select(AlertEvent).where(AlertEvent.workspace_id == self.workspace_id)
+        if instance_id is not None:
+            statement = statement.where(AlertEvent.instance_id == instance_id)
         return list(
             self.session.scalars(
-                select(AlertEvent)
-                .order_by(AlertEvent.created_at.desc())
-                .limit(limit)
-                .offset(offset)
+                statement.order_by(AlertEvent.created_at.desc()).limit(limit).offset(offset)
             )
         )
 
     def get(self, event_id: str) -> AlertEvent | None:
-        return self.session.get(AlertEvent, event_id)
+        return self.session.scalar(
+            select(AlertEvent).where(
+                AlertEvent.workspace_id == self.workspace_id, AlertEvent.id == event_id
+            )
+        )
 
     def in_cooldown(
         self,
         rule_id: str,
         deduplication_key: str,
         now: datetime,
+        instance_id: str | None = None,
     ) -> AlertEvent | None:
-        return self.session.scalar(
-            select(AlertEvent)
-            .where(
-                AlertEvent.rule_id == rule_id,
-                AlertEvent.deduplication_key == deduplication_key,
-                AlertEvent.cooldown_until > now,
-            )
-            .order_by(AlertEvent.created_at.desc())
+        statement = select(AlertEvent).where(
+            AlertEvent.workspace_id == self.workspace_id,
+            AlertEvent.rule_id == rule_id,
+            AlertEvent.deduplication_key == deduplication_key,
+            AlertEvent.cooldown_until > now,
         )
+        if instance_id is not None:
+            statement = statement.where(AlertEvent.instance_id == instance_id)
+        return self.session.scalar(statement.order_by(AlertEvent.created_at.desc()))
 
     def create_once(self, **values) -> tuple[AlertEvent, bool]:
+        values["workspace_id"] = self.workspace_id
         existing = self.session.scalar(
-            select(AlertEvent).where(AlertEvent.event_key == values["event_key"])
+            select(AlertEvent).where(
+                AlertEvent.workspace_id == self.workspace_id,
+                AlertEvent.event_key == values["event_key"],
+            )
         )
         if existing is not None:
             return existing, False
@@ -96,7 +128,10 @@ class AlertEventRepository:
                 self.session.flush()
         except IntegrityError:
             existing = self.session.scalar(
-                select(AlertEvent).where(AlertEvent.event_key == values["event_key"])
+                select(AlertEvent).where(
+                    AlertEvent.workspace_id == self.workspace_id,
+                    AlertEvent.event_key == values["event_key"],
+                )
             )
             if existing is None:
                 raise
@@ -107,13 +142,24 @@ class AlertEventRepository:
         return list(
             self.session.scalars(
                 select(AlertDeliveryAttempt)
-                .where(AlertDeliveryAttempt.alert_event_id == event_id)
+                .join(AlertEvent, AlertEvent.id == AlertDeliveryAttempt.alert_event_id)
+                .where(
+                    AlertEvent.workspace_id == self.workspace_id,
+                    AlertDeliveryAttempt.alert_event_id == event_id,
+                )
                 .order_by(AlertDeliveryAttempt.attempt_number)
             )
         )
 
     def attempt(self, attempt_id: str) -> AlertDeliveryAttempt | None:
-        return self.session.get(AlertDeliveryAttempt, attempt_id)
+        return self.session.scalar(
+            select(AlertDeliveryAttempt)
+            .join(AlertEvent, AlertEvent.id == AlertDeliveryAttempt.alert_event_id)
+            .where(
+                AlertEvent.workspace_id == self.workspace_id,
+                AlertDeliveryAttempt.id == attempt_id,
+            )
+        )
 
     def create_attempt(self, **values) -> AlertDeliveryAttempt:
         attempt = AlertDeliveryAttempt(**values)
@@ -148,7 +194,6 @@ class AlertEventRepository:
                         completed_at=None,
                     )
             except IntegrityError:
-                # Another process reserved this number first. Re-read durable state before retrying.
                 self.session.expire_all()
                 continue
             return attempt
@@ -157,19 +202,45 @@ class AlertEventRepository:
 
 class AlertConditionStateRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
-    def transition(self, condition_type: str, scope_key: str, current_state: str) -> bool:
+    def transition(
+        self,
+        condition_type: str,
+        scope_key: str,
+        current_state: str,
+        instance_id: str,
+    ) -> bool:
+        from app.services.alerts import scoped_alert_key
+
+        subject = scope_key
+        scope_key = scoped_alert_key(self.workspace_id, instance_id, condition_type, subject)
+        predicate = (
+            AlertConditionState.workspace_id == self.workspace_id,
+            AlertConditionState.instance_id == instance_id,
+            AlertConditionState.condition_type == condition_type,
+        )
         state = self.session.scalar(
             select(AlertConditionState).where(
-                AlertConditionState.condition_type == condition_type,
-                AlertConditionState.scope_key == scope_key,
+                *predicate, AlertConditionState.scope_key == scope_key
             )
         )
+        if state is None:
+            legacy_subject = "n8n:default" if subject == "monitoring" else subject
+            state = self.session.scalar(
+                select(AlertConditionState).where(
+                    *predicate, AlertConditionState.scope_key == legacy_subject
+                )
+            )
+            if state is not None:
+                state.scope_key = scope_key
         now = utc_now()
         if state is None:
             self.session.add(
                 AlertConditionState(
+                    workspace_id=self.workspace_id,
+                    instance_id=instance_id,
                     condition_type=condition_type,
                     scope_key=scope_key,
                     current_state=current_state,
@@ -179,6 +250,7 @@ class AlertConditionStateRepository:
             self.session.flush()
             return True
         changed = state.current_state != current_state
-        state.current_state = current_state
-        state.updated_at = now
+        if changed:
+            state.current_state = current_state
+            state.updated_at = now
         return changed

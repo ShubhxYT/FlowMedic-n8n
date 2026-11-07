@@ -60,24 +60,23 @@ class CompatibleAIProvider:
 
     name = "openai-compatible"
 
-    def __init__(self, settings, client: httpx.AsyncClient):
-        self.settings = settings
-        self.client = client
+    def __init__(self, snapshot, outbound, guard=None, *, transient_secrets=()):
+        self.snapshot = snapshot
+        self.outbound = outbound
+        self.guard = guard
+        self.transient_secrets = transient_secrets
 
     async def diagnose(self, context: Failure) -> Diagnosis:
         try:
-            secrets = (
-                self.settings.ai_api_key.get_secret_value(),
-                self.settings.n8n_api_key.get_secret_value(),
-                self.settings.flowmedic_api_key.get_secret_value(),
-            )
+            secrets = (self.snapshot.api_key.get_secret_value(), *self.transient_secrets)
             context = _sanitize_failure(context, secrets)
-            response = await self.client.post(
-                self.settings.ai_base_url + "/chat/completions",
-                headers={"Authorization": "Bearer " + self.settings.ai_api_key.get_secret_value()},
-                timeout=self.settings.request_timeout,
+            response = await self.outbound.post(
+                self.snapshot.base_url,
+                "/chat/completions",
+                headers={"Authorization": "Bearer " + self.snapshot.api_key.get_secret_value()},
+                guard=self.guard,
                 json={
-                    "model": self.settings.ai_model,
+                    "model": self.snapshot.model,
                     "messages": [
                         {
                             "role": "system",
@@ -109,6 +108,18 @@ class CompatibleAIProvider:
                     for key, value in diagnosis.model_dump().items()
                 }
             )
+        except ServiceError as exc:
+            if exc.code == "upstream_timeout":
+                raise ServiceError("ai_timeout", "Diagnosis provider timed out", 504) from None
+            if exc.code in {
+                "upstream_unreachable",
+                "upstream_redirect_rejected",
+                "upstream_response_too_large",
+            }:
+                raise ServiceError(
+                    "ai_error", "Diagnosis provider failed or returned invalid output"
+                ) from None
+            raise
         except httpx.TimeoutException:
             raise ServiceError("ai_timeout", "Diagnosis provider timed out", 504) from None
         except (httpx.HTTPError, ValueError, ValidationError, KeyError, IndexError, TypeError):

@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy import select
 
+from app.core.security import sanitize
+from app.models.connections import N8nInstance
 from app.models.incident import ExecutionHistory, Incident
 from app.repositories.alerts import (
     AlertConditionStateRepository,
@@ -27,14 +29,21 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def scoped_alert_key(*parts: str | int) -> str:
+    encoded = json.dumps(parts, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class DeliveryPayload:
     event_id: str
+    instance_id: str
     trigger_type: str
     incident_id: str | None
     workflow_id: str | None
     event_created_at: datetime
     attempt_number: int
+    instance_name: str | None = None
 
 
 class AlertDeliveryError(Exception):
@@ -95,6 +104,8 @@ class WebhookAlertDeliveryProvider(AlertDeliveryProvider):
                 "version": 1,
                 "event": {
                     "id": payload.event_id,
+                    "instance_id": payload.instance_id,
+                    "instance_name": payload.instance_name,
                     "trigger_type": payload.trigger_type,
                     "incident_id": payload.incident_id,
                     "workflow_id": payload.workflow_id,
@@ -116,7 +127,6 @@ class WebhookAlertDeliveryProvider(AlertDeliveryProvider):
             signature = hmac.new(self.signing_secret.encode(), signed, hashlib.sha256).hexdigest()
             headers["X-FlowMedic-Signature"] = f"v1={signature}"
         try:
-            # Streaming avoids processing or retaining remote response bodies.
             with self.client.stream("POST", self.url, content=body, headers=headers) as response:
                 status_code = response.status_code
         except httpx.TimeoutException as exc:
@@ -138,17 +148,32 @@ class AlertService:
         self,
         settings,
         session_factory,
+        workspace_id: str,
+        instance_id: str,
         provider: AlertDeliveryProvider | None = None,
         *,
         providers: dict[str, AlertDeliveryProvider] | None = None,
     ):
+        from app.core.workspaces import require_workspace
+
+        with session_factory() as session:
+            if require_workspace(session) != workspace_id:
+                raise ValueError("Alerts session is outside the workspace")
+        self.write_fence = None
+        self.transient_secrets = ()
         self.settings = settings
+        self.workspace_id = workspace_id
+        self.instance_id = instance_id
         self.session_factory = session_factory
         self.providers = providers or {"mock": provider or MockAlertDeliveryProvider()}
 
     @property
     def enabled(self) -> bool:
         return not self.settings.demo_mode
+
+    def _fence(self, session):
+        if self.write_fence is not None:
+            self.write_fence(session)
 
     def provider_available(self, provider_name: str) -> bool:
         return self.enabled and provider_name in self.providers
@@ -162,7 +187,12 @@ class AlertService:
     def on_new_incident(self, incident_id: str, workflow_id: str) -> int:
         return self._trigger(
             TRIGGER_NEW_INCIDENT,
-            deduplication_key=f"incident:{incident_id}",
+            deduplication_key=scoped_alert_key(
+                self.workspace_id,
+                self.instance_id,
+                TRIGGER_NEW_INCIDENT,
+                f"incident:{incident_id}",
+            ),
             incident_id=incident_id,
             workflow_id=workflow_id,
         )
@@ -171,8 +201,13 @@ class AlertService:
         if not self.enabled:
             return 0
         with self.session_factory() as session:
-            histories = session.scalars(select(ExecutionHistory)).all()
-            incidents = session.scalars(select(Incident)).all()
+            self._fence(session)
+            histories = session.scalars(
+                select(ExecutionHistory).where(ExecutionHistory.instance_id == self.instance_id)
+            ).all()
+            incidents = session.scalars(
+                select(Incident).where(Incident.instance_id == self.instance_id)
+            ).all()
             health_rows = build_workflow_health(histories, incidents)
             states = AlertConditionStateRepository(session)
             unhealthy_workflows = []
@@ -181,6 +216,7 @@ class AlertService:
                     TRIGGER_WORKFLOW_UNHEALTHY,
                     row.workflow_id,
                     row.health,
+                    self.instance_id,
                 )
                 if changed and row.health == "unhealthy":
                     unhealthy_workflows.append(row.workflow_id)
@@ -188,7 +224,12 @@ class AlertService:
         return sum(
             self._trigger(
                 TRIGGER_WORKFLOW_UNHEALTHY,
-                deduplication_key=f"workflow:{workflow_id}:unhealthy",
+                deduplication_key=scoped_alert_key(
+                    self.workspace_id,
+                    self.instance_id,
+                    TRIGGER_WORKFLOW_UNHEALTHY,
+                    f"workflow:{workflow_id}",
+                ),
                 workflow_id=workflow_id,
             )
             for workflow_id in unhealthy_workflows
@@ -198,16 +239,23 @@ class AlertService:
         if not self.enabled:
             return 0
         with self.session_factory() as session:
+            self._fence(session)
             changed = AlertConditionStateRepository(session).transition(
                 TRIGGER_MONITORING_DEGRADED,
-                "n8n:default",
+                "monitoring",
                 state,
+                self.instance_id,
             )
             session.commit()
         if changed and state == "degraded":
             return self._trigger(
                 TRIGGER_MONITORING_DEGRADED,
-                deduplication_key="monitoring:n8n:default:degraded",
+                deduplication_key=scoped_alert_key(
+                    self.workspace_id,
+                    self.instance_id,
+                    TRIGGER_MONITORING_DEGRADED,
+                    "monitoring",
+                ),
             )
         return 0
 
@@ -224,13 +272,23 @@ class AlertService:
         created_event_ids: list[str] = []
         now = utc_now()
         with self.session_factory() as session:
-            rules = AlertRuleRepository(session).enabled_for(trigger_type)
+            self._fence(session)
+            rules = AlertRuleRepository(session).enabled_for(trigger_type, self.instance_id)
             events = AlertEventRepository(session)
             for rule in rules:
-                if events.in_cooldown(rule.id, deduplication_key, now) is not None:
+                if (
+                    events.in_cooldown(
+                        rule.id,
+                        deduplication_key,
+                        now,
+                        instance_id=self.instance_id,
+                    )
+                    is not None
+                ):
                     continue
                 event_key = self._event_key(rule.id, deduplication_key, now, rule.cooldown_seconds)
                 event, created = events.create_once(
+                    instance_id=self.instance_id,
                     rule_id=rule.id,
                     trigger_type=trigger_type,
                     event_key=event_key,
@@ -255,6 +313,7 @@ class AlertService:
             return
         for _ in range(self.settings.alert_max_retries):
             with self.session_factory() as session:
+                self._fence(session)
                 events = AlertEventRepository(session)
                 event = events.get(event_id)
                 if event is None:
@@ -277,8 +336,13 @@ class AlertService:
                     return
                 session.commit()
                 attempt_id = attempt.id
+                instance = session.get(N8nInstance, event.instance_id)
                 payload = DeliveryPayload(
                     event_id=event.id,
+                    instance_id=event.instance_id,
+                    instance_name=sanitize(instance.name, self.transient_secrets)
+                    if instance
+                    else None,
                     trigger_type=event.trigger_type,
                     incident_id=event.incident_id,
                     workflow_id=event.workflow_id,
@@ -289,6 +353,7 @@ class AlertService:
                 provider.deliver(payload)
             except AlertDeliveryError as exc:
                 with self.session_factory() as session:
+                    self._fence(session)
                     event = AlertEventRepository(session).get(event_id)
                     attempt = AlertEventRepository(session).attempt(attempt_id)
                     if event is None or attempt is None:
@@ -309,6 +374,7 @@ class AlertService:
                 continue
             except Exception:
                 with self.session_factory() as session:
+                    self._fence(session)
                     event = AlertEventRepository(session).get(event_id)
                     attempt = AlertEventRepository(session).attempt(attempt_id)
                     if event is None or attempt is None:
@@ -326,6 +392,7 @@ class AlertService:
                 )
                 continue
             with self.session_factory() as session:
+                self._fence(session)
                 event = AlertEventRepository(session).get(event_id)
                 attempt = AlertEventRepository(session).attempt(attempt_id)
                 if event is None or attempt is None:
@@ -343,10 +410,10 @@ class AlertService:
             )
             return
 
-    @staticmethod
     def _event_key(
-        rule_id: str, deduplication_key: str, now: datetime, cooldown_seconds: int
+        self, rule_id: str, deduplication_key: str, now: datetime, cooldown_seconds: int
     ) -> str:
         window_start = int(now.timestamp()) // cooldown_seconds
-        value = f"{rule_id}:{deduplication_key}:{window_start}".encode()
-        return hashlib.sha256(value).hexdigest()
+        return scoped_alert_key(
+            self.workspace_id, self.instance_id, rule_id, deduplication_key, window_start
+        )

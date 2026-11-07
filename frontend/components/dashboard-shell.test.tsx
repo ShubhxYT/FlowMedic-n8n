@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/incidents" }));
 vi.mock("@/lib/api", () => ({ api: { health: vi.fn().mockResolvedValue({ status: "ok" }) } }));
+vi.mock("@/components/connection-scope", () => ({ useConnectionScope: () => ({ workspaceId: "w", role: "admin", instanceId: null, instances: [], loading: false, setInstance: vi.fn(), refresh: vi.fn() }) }));
 
 import { DashboardShell } from "@/components/dashboard-shell";
 

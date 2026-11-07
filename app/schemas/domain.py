@@ -28,6 +28,8 @@ class Failure(BaseModel):
 class IncidentOut(Failure):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    workspace_id: str
+    instance_id: str
     status: Literal["open", "diagnosed"]
     diagnosis: Diagnosis | None = None
     diagnosis_provider: str | None = None
@@ -35,6 +37,8 @@ class IncidentOut(Failure):
 
 class Workflow(BaseModel):
     id: str
+    workspace_id: str
+    instance_id: str
     name: str
     active: bool
 
@@ -66,10 +70,26 @@ class DemoInfo(BaseModel):
     note: str
 
 
+ConfigurationState = Literal["not_configured", "disabled", "ready", "configuration_error"]
+
+
+class InstanceConfigurationStatus(BaseModel):
+    instance_id: str
+    instance_name: str
+    state: ConfigurationState
+
+
 class SystemStatus(BaseModel):
     n8n_configured: bool
     ai_mode: Literal["mock", "configured"]
     database_engine: str
+    enabled_n8n_count: int = 0
+    n8n_instances: list[InstanceConfigurationStatus] = Field(default_factory=list)
+    ai_state: ConfigurationState = "not_configured"
+    poll_interval_seconds: float = 30
+    poll_concurrency: int = 4
+    lease_seconds: float = 120
+    retention_days: int = 30
 
 
 MonitoringState = Literal["disabled", "idle", "running", "degraded"]
@@ -79,6 +99,10 @@ WorkflowHealthState = Literal["unknown", "healthy", "degraded", "unhealthy"]
 
 
 class MonitoringStatus(BaseModel):
+    workspace_id: str | None = None
+    instance_id: str | None = None
+    instance_name: str | None = None
+    configuration_state: ConfigurationState = "ready"
     enabled: bool
     state: MonitoringState
     poll_interval_seconds: float
@@ -98,6 +122,8 @@ class MonitoringStatus(BaseModel):
 
 class MonitoringSyncResult(BaseModel):
     status: Literal["completed", "skipped", "disabled", "failed"]
+    workspace_id: str | None = None
+    instance_id: str | None = None
     executions_discovered: int = 0
     history_records_created: int = 0
     incidents_created: int = 0
@@ -105,6 +131,8 @@ class MonitoringSyncResult(BaseModel):
 
 
 class WorkflowHealth(BaseModel):
+    workspace_id: str
+    instance_id: str
     workflow_id: str
     workflow_name: str
     health: WorkflowHealthState
@@ -120,6 +148,10 @@ class WorkflowHealth(BaseModel):
 
 class WorkflowHealthPage(BaseModel):
     data: list[WorkflowHealth]
+
+
+class MonitoringStatusPage(BaseModel):
+    items: list[MonitoringStatus]
 
 
 class OverviewMetrics(BaseModel):
@@ -161,6 +193,7 @@ class AlertRuleUpdate(BaseModel):
 class AlertRuleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    instance_id: str | None = None
     name: str
     trigger_type: AlertTriggerType
     enabled: bool
@@ -177,6 +210,8 @@ class AlertRulePage(BaseModel):
 class AlertEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    workspace_id: str
+    instance_id: str
     rule_id: str
     trigger_type: AlertTriggerType
     deduplication_key: str

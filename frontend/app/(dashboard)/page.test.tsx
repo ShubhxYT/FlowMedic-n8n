@@ -1,6 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("@/components/connection-scope", () => ({useConnectionScope: () => ({workspaceId: "w", instanceId: null, instances: []})}));
+
 vi.mock("@/lib/api", () => ({
   api: {
     incidents: vi.fn().mockResolvedValue({ data: [] }),
@@ -28,7 +30,7 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-import OverviewPage from "@/app/page";
+import OverviewPage from "@/app/(dashboard)/page";
 
 describe("OverviewPage", () => {
   it("renders an honest empty incident state", async () => {

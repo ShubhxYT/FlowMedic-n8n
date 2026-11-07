@@ -12,6 +12,8 @@ export interface Diagnosis {
 }
 
 export interface Incident {
+  workspace_id: string;
+  instance_id: string;
   id: string;
   workflow_id: string;
   workflow_name: string;
@@ -27,6 +29,8 @@ export interface Incident {
 }
 
 export interface Workflow {
+  workspace_id: string;
+  instance_id: string;
   id: string;
   name: string;
   active: boolean;
@@ -50,6 +54,9 @@ export interface N8nConnectionResponse {
 }
 
 export interface SystemStatus {
+  enabled_n8n_count: number;
+  poll_interval_seconds: number;
+  retention_days: number;
   n8n_configured: boolean;
   ai_mode: "mock" | "configured";
   database_engine: string;
@@ -61,6 +68,10 @@ export type LeaseState = "active" | "standby" | "unclaimed";
 export type WorkflowHealthState = "unknown" | "healthy" | "degraded" | "unhealthy";
 
 export interface MonitoringStatus {
+  workspace_id: string | null;
+  instance_id: string | null;
+  instance_name: string | null;
+  configuration_state: "not_configured" | "disabled" | "ready" | "configuration_error";
   enabled: boolean;
   state: MonitoringState;
   poll_interval_seconds: number;
@@ -79,6 +90,8 @@ export interface MonitoringStatus {
 }
 
 export interface WorkflowHealth {
+  workspace_id: string;
+  instance_id: string;
   workflow_id: string;
   workflow_name: string;
   health: WorkflowHealthState;
@@ -129,6 +142,8 @@ export interface AlertRule {
 }
 
 export interface AlertEvent {
+  workspace_id: string;
+  instance_id: string;
   id: string;
   rule_id: string;
   trigger_type: AlertTriggerType;
@@ -149,3 +164,60 @@ export interface AlertRulePage {
 export interface AlertEventPage {
   data: AlertEvent[];
 }
+
+export interface AccountWorkspace {
+  id: string;
+  name: string;
+  role: "admin" | "viewer";
+}
+
+export interface CurrentUser {
+  user: { id: string | null; email: string };
+  workspace: AccountWorkspace;
+  workspaces: AccountWorkspace[];
+  demo: boolean;
+}
+
+export type ConnectionCollection = "n8n-instances" | "ai-providers";
+export type ConnectionKind = "n8n" | "openai-compatible" | "mock";
+
+export interface ManagedConnection {
+  id: string;
+  name: string;
+  base_url: string | null;
+  kind: ConnectionKind;
+  model: string | null;
+  enabled: boolean;
+  revision: number;
+  has_api_key: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConnectionPage {
+  items: ManagedConnection[];
+  state_revision: number;
+}
+
+export interface ConnectionInput {
+  name?: string;
+  base_url?: string;
+  api_key?: string;
+  remove_api_key?: boolean;
+  enabled?: boolean;
+  kind?: "openai-compatible" | "mock";
+  model?: string;
+  confirm_same_server?: boolean;
+  make_default?: boolean;
+  expected_state_revision?: number;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  capability: "workflows_read" | "model_access" | "structured_output" | "mock";
+  tested_revision: number | null;
+  message: string;
+}
+
+export interface MonitoringStatusPage { items: MonitoringStatus[]; }

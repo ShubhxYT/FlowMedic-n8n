@@ -1,11 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from auth_support import legacy_factory
+from connection_support import provision, snapshot
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, inspect, select, text
 
 from app.core.config import Settings
 from app.core.database import create_database
+from app.core.migrations import upgrade_database
 from app.integrations.n8n.client import Execution
 from app.main import create_app
 from app.models.incident import Base, ExecutionHistory
@@ -16,6 +19,8 @@ from app.services.monitoring import MonitoringService
 def history(execution_id, started, recorded, success):
     return ExecutionHistory(
         source="n8n",
+        workspace_id=snapshot().workspace_id,
+        instance_id=snapshot().id,
         workflow_id="w",
         workflow_name="Workflow",
         execution_id=execution_id,
@@ -46,7 +51,11 @@ def test_monitoring_updates_running_execution_and_sanitizes_name():
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
-    service = MonitoringService(settings, factory, None)
+    factory = legacy_factory(factory)
+    service = MonitoringService(
+        settings, factory, None, provision(factory, api_key=settings.n8n_api_key.get_secret_value())
+    )
+    assert service._acquire_lease()
     try:
         execution = Execution(
             id="1", workflowId="w", status="running", workflowData={"name": "token=test-secret"}
@@ -99,8 +108,15 @@ def test_workflow_names_are_redacted_before_history_persistence():
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     try:
-        service = MonitoringService(settings, factory, None)
+        service = MonitoringService(
+            settings,
+            factory,
+            None,
+            provision(factory, api_key=settings.n8n_api_key.get_secret_value()),
+        )
+        assert service._acquire_lease()
         service._persist_entries(
             [
                 Execution(
@@ -137,6 +153,8 @@ def test_file_backed_app_startup_does_not_run_alembic_migrations(tmp_path, monke
 
     database_path = tmp_path / "startup.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
+    # Authentication storage requires the documented migrate-before-start order.
+    upgrade_database(database_url)
 
     settings = Settings(
         _env_file=None,
@@ -150,6 +168,11 @@ def test_file_backed_app_startup_does_not_run_alembic_migrations(tmp_path, monke
 
     engine = create_engine(database_url)
     try:
-        assert not inspect(engine).has_table("alembic_version")
+        assert inspect(engine).has_table("alembic_version")
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            assert revision == "0005_gui_connections"
     finally:
         engine.dispose()

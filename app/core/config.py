@@ -1,3 +1,4 @@
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -16,9 +17,12 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = "gpt-4.1-mini"
     flowmedic_api_key: SecretStr = SecretStr("")
-    # Local-development escape hatch. Without FLOWMEDIC_API_KEY, mutating routes fail closed (503)
-    # unless this is explicitly enabled.
-    allow_unauthenticated_mutations: bool = False
+    auth_registration_enabled: bool = False
+    auth_allow_insecure_cookies: bool = False
+    auth_trusted_origins: str = "https://localhost:3000"
+    auth_session_seconds: int = Field(default=43200, ge=300, le=604800)
+    auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
+    api_docs_enabled: bool = False
     diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
     demo_mode: bool = False
     public_demo_readonly: bool = False
@@ -37,6 +41,14 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = None
     alert_webhook_timeout_seconds: float = Field(default=5, gt=0, le=15)
     alert_webhook_signing_secret: SecretStr = SecretStr("")
+    connection_encryption_keys: SecretStr = SecretStr("")
+    connection_active_key_id: str = Field(default="", max_length=64)
+    connection_reconcile_seconds: float = Field(default=5, ge=1, le=60)
+    connection_poll_concurrency: int = Field(default=4, ge=1, le=16)
+    outbound_destinations: str = "[]"
+    outbound_allow_local_http: bool = False
+    outbound_egress_enforced: bool = False
+    deployment_environment: Literal["development", "production"] = "production"
 
     @field_validator("n8n_base_url", "ai_base_url")
     @classmethod
@@ -67,6 +79,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def key_requires_url(self):
+        origins = [value.strip() for value in self.auth_trusted_origins.split(",")]
+        for value in origins:
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path
+                or value.endswith("/")
+            ):
+                raise ValueError("AUTH_TRUSTED_ORIGINS must contain exact HTTP(S) origins")
+            if parsed.scheme != "https" and not self.auth_allow_insecure_cookies:
+                raise ValueError("HTTP auth origins require explicit insecure development cookies")
+            if self.auth_allow_insecure_cookies and parsed.hostname not in {
+                "localhost",
+                "127.0.0.1",
+                "::1",
+            }:
+                raise ValueError("Insecure cookies are permitted only on local development origins")
         if self.n8n_api_key.get_secret_value() and not self.n8n_base_url:
             raise ValueError("N8N_BASE_URL is required when N8N_API_KEY is set")
         if self.public_demo_readonly and not self.demo_mode:

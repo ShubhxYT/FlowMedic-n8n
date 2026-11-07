@@ -8,15 +8,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
-from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
+from app import models  # noqa: F401
+from app.ai.providers import MockDiagnosisProvider
+from app.api.auth import router as auth_router
 from app.api.routes import router
+from app.api.settings import router as settings_router
 from app.core.config import Settings
 from app.core.database import create_database
+from app.core.encryption import ConnectionCipher
 from app.core.errors import ServiceError
 from app.core.ratelimit import RateLimiter
-from app.demo import demo_failure, seed_demo_history
+from app.core.security import BodySizeLimitMiddleware
+from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
+from app.demo import DEMO_INSTANCE_ID, demo_failure, ensure_demo_instance, seed_demo_history
 from app.integrations.n8n.client import N8nClient
+from app.integrations.outbound import OutboundHTTP, OutboundPolicy
+from app.models.auth import DEMO_WORKSPACE_ID
 from app.models.incident import Base
+from app.repositories.connections import verify_keyring_startup
 from app.repositories.incidents import IncidentRepository
 from app.schemas.domain import ErrorResponse
 from app.services.alerts import (
@@ -24,13 +33,21 @@ from app.services.alerts import (
     MockAlertDeliveryProvider,
     WebhookAlertDeliveryProvider,
 )
+from app.services.connection_registry import (
+    ConnectionRegistry,
+    read_enabled_snapshots,
+    revision_guard,
+)
+from app.services.connections import ConnectionService
 from app.services.monitoring import MonitoringService
-
-MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def error_response(code, message, status_code):
-    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status_code)
+    return JSONResponse(
+        {"error": {"code": code, "message": message}},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app(
@@ -39,6 +56,7 @@ def create_app(
     n8n_transport=None,
     ai_transport=None,
     webhook_transport=None,
+    outbound_transport=None,
 ):
     config = settings or Settings()
 
@@ -48,8 +66,14 @@ def create_app(
         if ":memory:" in config.database_url:
             # Isolated test databases are initialized directly, without Alembic.
             Base.metadata.create_all(engine)
+        ensure_reserved_workspaces(factory)
+        cipher = None
+        keys = config.connection_encryption_keys.get_secret_value()
+        if not config.demo_mode and keys:
+            cipher = ConnectionCipher(keys, config.connection_active_key_id)
+        verify_keyring_startup(factory, cipher, demo_mode=config.demo_mode)
+        app.state.connection_cipher = cipher
         app.state.session_factory = factory
-        app.state.monitoring = None
         providers = {"mock": MockAlertDeliveryProvider()}
         if config.alert_webhook_url and not config.demo_mode:
             providers["webhook"] = WebhookAlertDeliveryProvider(
@@ -58,53 +82,123 @@ def create_app(
                 signing_secret=config.alert_webhook_signing_secret.get_secret_value(),
                 transport=webhook_transport,
             )
-        app.state.alerts = AlertService(config, factory, providers=providers)
+        app.state.alert_providers = providers
+        registry_holder: dict[str, ConnectionRegistry] = {}
         try:
+            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
             async with (
-                httpx.AsyncClient(transport=n8n_transport, follow_redirects=False) as n8n_http,
-                httpx.AsyncClient(transport=ai_transport, follow_redirects=False) as ai_http,
+                httpx.AsyncClient(
+                    transport=n8n_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as n8n_http,
+                httpx.AsyncClient(
+                    transport=ai_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as ai_http,
+                httpx.AsyncClient(
+                    transport=outbound_transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                    limits=limits,
+                ) as outbound_http,
             ):
-                app.state.n8n = N8nClient(config, n8n_http)
-                app.state.provider = (
-                    CompatibleAIProvider(config, ai_http)
-                    if config.ai_api_key.get_secret_value() and not config.demo_mode
-                    else MockDiagnosisProvider()
+                policy = OutboundPolicy(config)
+                outbound = OutboundHTTP(outbound_http, policy)
+                n8n_outbound = OutboundHTTP(n8n_http, policy)
+                app.state.outbound = outbound
+                app.state.ai_outbound = OutboundHTTP(ai_http, policy)
+                app.state.connections = ConnectionService(
+                    factory,
+                    cipher,
+                    outbound,
+                    notify_changed=lambda: registry_holder["registry"].notify_changed(),
                 )
+
+                def read_enabled():
+                    if cipher is None:
+                        return []
+                    return read_enabled_snapshots(factory, cipher)
+
+                def build_worker(snapshot, slots):
+                    workspace_factory = WorkspaceFactory(factory, snapshot.workspace_id)
+                    alerts = AlertService(
+                        config,
+                        workspace_factory,
+                        snapshot.workspace_id,
+                        snapshot.id,
+                        providers=providers,
+                    )
+                    client = N8nClient(
+                        snapshot,
+                        n8n_outbound,
+                        guard=revision_guard(factory, snapshot),
+                    )
+                    return MonitoringService(
+                        config,
+                        workspace_factory,
+                        client,
+                        snapshot,
+                        alerts=alerts,
+                        poll_slots=slots,
+                    )
+
+                registry = ConnectionRegistry(
+                    read_enabled,
+                    build_worker,
+                    reconcile_seconds=config.connection_reconcile_seconds,
+                    concurrency=config.connection_poll_concurrency,
+                )
+                registry_holder["registry"] = registry
+                app.state.connections.drain = registry.drain
+                app.state.registry = registry
+
                 if config.demo_mode:
-                    with factory() as session:
+                    with WorkspaceFactory(factory, DEMO_WORKSPACE_ID)() as session:
+                        ensure_demo_instance(session)
                         failure = demo_failure()
-                        incident, _ = IncidentRepository(session).create_once(failure)
+                        incident, _ = IncidentRepository(
+                            session, DEMO_WORKSPACE_ID, DEMO_INSTANCE_ID
+                        ).create_once(failure)
                         if incident.diagnosis is None:
                             incident.diagnosis = (
-                                await app.state.provider.diagnose(failure)
+                                await MockDiagnosisProvider().diagnose(failure)
                             ).model_dump()
-                            incident.diagnosis_provider = app.state.provider.name
+                            incident.diagnosis_provider = "mock"
                             incident.status = "diagnosed"
                         session.commit()
                         app.state.demo_incident_id = incident.id
                         seed_demo_history(session, incident.id)
                         session.commit()
-                app.state.monitoring = MonitoringService(
-                    config,
-                    factory,
-                    app.state.n8n,
-                    alerts=app.state.alerts,
-                )
-                await app.state.monitoring.start()
-                yield
+                else:
+                    await registry.start()
+                try:
+                    yield
+                finally:
+                    await registry.stop()
+                    for provider in providers.values():
+                        close = getattr(provider, "close", None)
+                        if callable(close):
+                            close()
         finally:
-            if app.state.monitoring is not None:
-                await app.state.monitoring.stop()
-            app.state.alerts.close()
             engine.dispose()
 
-    app = FastAPI(title="FlowMedic AI", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="FlowMedic AI",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if config.api_docs_enabled else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if config.api_docs_enabled else None,
+    )
     app.state.settings = config
     app.state.diagnose_limiter = RateLimiter(config.diagnose_rate_limit_per_minute, 60)
 
     @app.middleware("http")
     async def readonly_public_demo(request: Request, call_next):
-        # Visitors can browse synthetic data but cannot mutate demo state.
         if config.public_demo_readonly and request.method not in {"GET", "HEAD", "OPTIONS"}:
             return error_response("demo_readonly", "Public demo is read-only", 403)
         return await call_next(request)
@@ -112,24 +206,27 @@ def create_app(
     @app.middleware("http")
     async def authentication(request: Request, call_next):
         key = config.flowmedic_api_key.get_secret_value()
-        if (
-            not key
-            and request.method in MUTATING_METHODS
-            and request.url.path != "/health"
-            and not config.allow_unauthenticated_mutations
-            and not config.public_demo_readonly  # the read-only demo middleware rejects these
-        ):
-            return error_response(
-                "auth_not_configured",
-                "FLOWMEDIC_API_KEY must be set before mutating routes can be used",
-                503,
-            )
-        if key and request.url.path != "/health":
+        request.state.service_authenticated = False
+        # User sessions (plus CSRF) authorize business mutations; the optional bearer
+        # token only authenticates the internal service boundary.
+        if key and request.url.path != "/health" and request.method != "OPTIONS":
             expected = ("Bearer " + key).encode()
             supplied = request.headers.get("Authorization", "").encode()
             if not secrets.compare_digest(supplied, expected):
                 return error_response("unauthorized", "A valid bearer token is required", 401)
-        return await call_next(request)
+            request.state.service_authenticated = True
+        response = await call_next(request)
+        if request.method in {"POST", "PATCH", "DELETE"} and response.status_code >= 400:
+            context = getattr(request.state, "auth", None)
+            if context is not None:
+                from app.services.auth import audit
+
+                with app.state.session_factory() as session:
+                    audit(session, context, "request.mutation", "denied")
+                    session.commit()
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     @app.exception_handler(ServiceError)
     async def service_error(request, exc):
@@ -137,7 +234,6 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
-        # Validation details can echo sensitive user input; expose a fixed message.
         return error_response("validation_error", "Invalid request parameters", 422)
 
     @app.exception_handler(HTTPException)
@@ -156,10 +252,12 @@ def create_app(
     def index() -> dict[str, str | None]:
         return {
             "service": "FlowMedic AI",
-            "docs": "/docs",
+            "docs": "/docs" if config.api_docs_enabled else None,
             "demo": "/api/v1/demo" if config.demo_mode else None,
         }
 
+    app.include_router(auth_router)
+    app.include_router(settings_router)
     app.include_router(
         router,
         responses={
@@ -167,16 +265,16 @@ def create_app(
             for status in (401, 404, 409, 422, 429, 500, 502, 503, 504)
         },
     )
-    # Handle browser preflight before bearer checks and add CORS to safe errors.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             origin.strip() for origin in config.cors_allow_origins.split(",") if origin.strip()
         ],
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
+    app.add_middleware(BodySizeLimitMiddleware)
     return app
 
 

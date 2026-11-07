@@ -3,6 +3,9 @@ import json
 
 import httpx
 import pytest
+from auth_support import legacy_factory
+from connection_support import provision
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from app.ai.providers import CompatibleAIProvider
@@ -12,6 +15,7 @@ from app.core.errors import ServiceError
 from app.core.security import sanitize
 from app.integrations.n8n.client import Execution
 from app.models.incident import Base, Incident
+from app.repositories.connections import ConnectionSnapshot
 from app.repositories.monitoring import MonitoringRepository
 from app.schemas.domain import Failure
 from app.services.monitoring import MonitoringService
@@ -41,6 +45,24 @@ DIAGNOSIS = {
 }
 
 
+class _DirectOutbound:
+    """OutboundHTTP-compatible transport double for provider prompt capture."""
+
+    def __init__(self, client):
+        self.client = client
+
+    async def post(self, base_url, path, *, headers=None, guard=None, **kwargs):
+        if guard is not None:
+            guard()
+        request = httpx.Request(
+            "POST",
+            base_url + path,
+            headers={"Accept": "application/json", **(headers or {})},
+            **kwargs,
+        )
+        return await self.client.send(request, auth=None, follow_redirects=False)
+
+
 def _capture_prompt(context: Failure) -> str:
     captured: dict[str, bytes] = {}
 
@@ -53,9 +75,17 @@ def _capture_prompt(context: Failure) -> str:
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider = CompatibleAIProvider(
-                Settings(_env_file=None, ai_api_key="ai-secret"), client
+            snapshot = ConnectionSnapshot(
+                workspace_id="workspace",
+                id="provider",
+                revision=1,
+                kind="openai-compatible",
+                name="Test provider",
+                base_url="https://api.example.test",
+                model="test-model",
+                api_key=SecretStr("ai-secret"),
             )
+            provider = CompatibleAIProvider(snapshot, _DirectOutbound(client))
             await provider.diagnose(context)
 
     asyncio.run(run())
@@ -194,10 +224,12 @@ def test_monitoring_ingestion_sanitizes_all_incident_text_fields(execution):
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     try:
-        service = MonitoringService(settings, factory, n8n=None)
+        scoped = legacy_factory(factory)
+        service = MonitoringService(settings, scoped, n8n=None, snapshot=provision(factory))
+        service._fence = lambda session: None
         service._persist_entries([detail])
 
-        with factory() as session:
+        with scoped() as session:
             incident = session.scalar(select(Incident))
             assert incident is not None
             for value in (
@@ -226,11 +258,16 @@ def test_monitoring_failure_summary_is_sanitized():
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
     try:
-        service = MonitoringService(settings, factory, n8n=None)
+        scoped = legacy_factory(factory)
+        snapshot = provision(factory)
+        service = MonitoringService(settings, scoped, n8n=None, snapshot=snapshot)
+        service._fence = lambda session: None
         service._record_failure(ServiceError("n8n_error", ISSUE_MESSAGE, 502))
 
-        with factory() as session:
-            checkpoint = MonitoringRepository(session).existing_checkpoint("n8n", "default")
+        with scoped() as session:
+            checkpoint = MonitoringRepository(
+                session, snapshot.workspace_id, snapshot.id
+            ).existing_checkpoint("n8n")
             assert checkpoint is not None
             assert checkpoint.last_error_summary is not None
             assert "sk-live-ABC123SECRETKEY" not in checkpoint.last_error_summary

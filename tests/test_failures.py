@@ -2,7 +2,8 @@ import asyncio
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from connection_support import ManagedClient as OperatorClient
+from connection_support import outbound, snapshot
 
 from app.core.config import Settings
 from app.integrations.n8n.client import N8nClient
@@ -18,8 +19,8 @@ def test_cursor_forwarded():
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             n8n = N8nClient(
-                Settings(_env_file=None, n8n_base_url="https://example.com", n8n_api_key="key"),
-                client,
+                snapshot(),
+                outbound(client),
             )
             page = await n8n.recent_executions(7, "a+b/c==")
             assert page.data == [] and page.nextCursor is None
@@ -53,8 +54,13 @@ def test_ai_failure_does_not_mark_incident_diagnosed(execution, failure):
         n8n_transport=httpx.MockTransport(n8n_handler),
         ai_transport=httpx.MockTransport(ai_handler),
     )
-    with TestClient(app) as client:
-        assert client.post("/api/v1/incidents/sync").status_code == 200
+    with OperatorClient(app) as client:
+        assert (
+            client.post(
+                "/api/v1/incidents/sync", params={"instance_id": client.instance_id}
+            ).status_code
+            == 200
+        )
         incident_id = client.get("/api/v1/incidents").json()["data"][0]["id"]
         path = "/api/v1/incidents/" + incident_id
         response = client.post(path + "/diagnose")

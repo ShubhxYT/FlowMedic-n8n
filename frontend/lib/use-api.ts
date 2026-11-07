@@ -36,6 +36,9 @@ export function useApi<T>(load: () => Promise<T>, key = "initial"): QueryState<T
         setState({ key, data, error: null, loading: false });
       }
     } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401 && typeof window !== "undefined") {
+        window.dispatchEvent(new Event("flowmedic:session-expired"));
+      }
       if (mounted.current && requestId === sequence.current) {
         setState({
           key,

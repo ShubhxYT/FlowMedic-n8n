@@ -1,11 +1,14 @@
 "use client";
 
+import { InstanceSelector } from "@/components/instance-selector";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { AlertIcon, BellIcon, CloseIcon, GridIcon, LockIcon, MenuIcon, PulseIcon, SettingsIcon, WorkflowIcon } from "@/components/icons";
 import { SystemStatus } from "@/components/system-status";
+import { useAccount } from "@/components/account-provider";
+import { api } from "@/lib/api";
 
 const navigation = [
   { href: "/", label: "Overview", icon: GridIcon },
@@ -19,6 +22,13 @@ type FocusTarget = "toggle" | "main" | null;
 
 export function DashboardShell({ children }: Readonly<{ children: React.ReactNode }>) {
   const pathname = usePathname();
+  const account = useAccount();
+  const [accountError, setAccountError] = useState("");
+  async function accountAction(action: () => Promise<unknown>, destination: string) {
+    setAccountError("");
+    try { await action(); window.location.assign(destination); }
+    catch (reason) { setAccountError(reason instanceof Error ? reason.message : "Account action failed"); }
+  }
   const [openAt, setOpenAt] = useState<string | null>(null);
   const open = openAt === pathname;
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -65,7 +75,19 @@ export function DashboardShell({ children }: Readonly<{ children: React.ReactNod
         >
           <MenuIcon className="size-5" />
         </button>
-        <div className="ml-auto"><SystemStatus /></div>
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <span>{account?.user.email} · {account?.workspace.role}</span>
+          {account && !account.demo && <>
+            <label>Workspace <select aria-label="Workspace" value={account.workspace.id}
+              onChange={(event) => void accountAction(() => api.selectWorkspace(event.target.value), "/")}>
+              {account.workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+            </select></label>
+            <button className="button button-secondary" onClick={() => void accountAction(api.logout, "/login")}>Log out</button>
+          </>}
+          <InstanceSelector />
+          <SystemStatus />
+          {accountError && <span role="alert">{accountError}</span>}
+        </div>
       </header>
       <aside id="primary-sidebar" className={`sidebar ${open ? "sidebar-open" : ""}`}>
         <div className="sidebar-head">

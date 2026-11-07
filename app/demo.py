@@ -2,10 +2,13 @@
 
 from datetime import UTC, datetime, timedelta
 
+from app.models.auth import DEMO_WORKSPACE_ID
+from app.models.connections import N8nInstance
 from app.repositories.monitoring import ExecutionHistoryRepository
 from app.schemas.domain import Failure
 
 DEMO_EXECUTION_ID = "demo-execution-auth-401"
+DEMO_INSTANCE_ID = "00000000-0000-0000-0000-0000000000d1"
 
 
 def demo_failure() -> Failure:
@@ -22,9 +25,30 @@ def demo_failure() -> Failure:
     )
 
 
+def ensure_demo_instance(session) -> None:
+    """Create the synthetic instance row required by scoped business tables."""
+    row = session.get(N8nInstance, DEMO_INSTANCE_ID)
+    if row is None:
+        now = datetime.now(UTC)
+        session.add(
+            N8nInstance(
+                id=DEMO_INSTANCE_ID,
+                workspace_id=DEMO_WORKSPACE_ID,
+                name="Synthetic demo",
+                base_url="https://demo.invalid",
+                enabled=False,
+                deleted=False,
+                revision=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+
+
 def seed_demo_history(session, incident_id: str) -> None:
     """Seed a small, deterministic, synthetic history for the dashboard preview."""
-    repository = ExecutionHistoryRepository(session)
+    repository = ExecutionHistoryRepository(session, DEMO_WORKSPACE_ID, DEMO_INSTANCE_ID)
     start = datetime(2026, 9, 9, 8, 0, tzinfo=UTC)
     records = [
         ("demo-healthy-workflow", "Demo inventory sync", "demo-inventory-1", "success", True, 1),
@@ -47,4 +71,4 @@ def seed_demo_history(session, incident_id: str) -> None:
             is_success=is_success,
         )
         if execution_id == DEMO_EXECUTION_ID:
-            repository.attach_incident(history, incident_id)
+            history.incident_id = incident_id

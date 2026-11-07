@@ -1,5 +1,7 @@
 "use client";
 
+import { useConnectionScope } from "@/components/connection-scope";
+
 import { useMemo, useState } from "react";
 
 import { IncidentTable } from "@/components/incident-table";
@@ -12,11 +14,17 @@ import { useApi } from "@/lib/use-api";
 const pageSize = 20;
 
 export default function IncidentsPage() {
+  const {workspaceId, instanceId} = useConnectionScope();
+  return <IncidentData key={`${workspaceId}:${instanceId ?? "all"}`} />;
+}
+
+function IncidentData() {
+  const {workspaceId, instanceId} = useConnectionScope();
   const [page, setPage] = useState(0);
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [status, setStatus] = useState<IncidentStatus | "all">("all");
   const [query, setQuery] = useState("");
-  const incidents = useApi(() => api.incidents(pageSize, page * pageSize), `page-${page}`);
+  const incidents = useApi(() => api.incidents(instanceId, pageSize, page * pageSize), `${workspaceId}:${instanceId ?? "all"}:incidents:${page}`);
 
   const rows = useMemo(() => (incidents.data?.data ?? []).filter((incident) => {
     const matchesSeverity = severity === "all" || incident.severity === severity;
