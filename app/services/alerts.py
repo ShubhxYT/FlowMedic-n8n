@@ -6,15 +6,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import select
 
-from app.models.incident import ExecutionHistory, Incident
 from app.repositories.alerts import (
     AlertConditionStateRepository,
     AlertEventRepository,
     AlertRuleRepository,
 )
-from app.services.health import build_workflow_health
+from app.services.health_queries import workflow_health_rows
 
 logger = logging.getLogger(__name__)
 
@@ -171,9 +169,7 @@ class AlertService:
         if not self.enabled:
             return 0
         with self.session_factory() as session:
-            histories = session.scalars(select(ExecutionHistory)).all()
-            incidents = session.scalars(select(Incident)).all()
-            health_rows = build_workflow_health(histories, incidents)
+            health_rows = workflow_health_rows(session)
             states = AlertConditionStateRepository(session)
             unhealthy_workflows = []
             for row in health_rows:

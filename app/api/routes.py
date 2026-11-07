@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ServiceError
 from app.core.security import sanitize
-from app.models.incident import AlertRule, ExecutionHistory, Incident
+from app.models.incident import AlertRule
 from app.repositories.alerts import AlertEventRepository, AlertRuleRepository
 from app.repositories.incidents import IncidentRepository
 from app.schemas.domain import (
@@ -33,7 +33,13 @@ from app.schemas.domain import (
     WorkflowHealthPage,
     WorkflowPage,
 )
-from app.services.health import build_workflow_health, global_recent_counts
+from app.services.health_queries import (
+    global_recent_counts,
+    open_incident_count,
+)
+from app.services.health_queries import (
+    workflow_health_rows as query_workflow_health_rows,
+)
 from app.services.incidents import normalize
 
 router = APIRouter(prefix="/api/v1")
@@ -89,15 +95,13 @@ async def monitoring_sync(request: Request) -> MonitoringSyncResult:
 
 
 def workflow_health_rows(session: Session) -> list[WorkflowHealth]:
-    history = session.scalars(select(ExecutionHistory)).all()
-    incidents = session.scalars(select(Incident)).all()
-    return build_workflow_health(history, incidents)
+    return query_workflow_health_rows(session)
 
 
 @router.get("/metrics/overview", response_model=OverviewMetrics)
 def overview_metrics(request: Request, session: DB) -> OverviewMetrics:
     workflows = workflow_health_rows(session)
-    successes, failures = global_recent_counts(session.scalars(select(ExecutionHistory)).all())
+    successes, failures = global_recent_counts(session)
     monitoring = request.app.state.monitoring.status()
     return OverviewMetrics(
         monitored_workflow_count=len(workflows),
@@ -105,9 +109,7 @@ def overview_metrics(request: Request, session: DB) -> OverviewMetrics:
         degraded_workflow_count=sum(item.health == "degraded" for item in workflows),
         unhealthy_workflow_count=sum(item.health == "unhealthy" for item in workflows),
         unknown_workflow_count=sum(item.health == "unknown" for item in workflows),
-        open_incident_count=sum(
-            item.status == "open" for item in session.scalars(select(Incident)).all()
-        ),
+        open_incident_count=open_incident_count(session),
         recent_failure_count=failures,
         recent_success_count=successes,
         last_successful_monitoring_sync_at=monitoring.last_successful_sync_at,
@@ -124,9 +126,12 @@ def workflow_metrics(session: DB) -> WorkflowHealthPage:
 def workflow_health(workflow_id: str, session: DB) -> WorkflowHealth:
     if len(workflow_id) > 255:
         raise ServiceError("workflow_not_found", "Workflow health was not found", 404)
-    for health in workflow_health_rows(session):
-        if health.workflow_id == workflow_id:
-            return health
+    health_rows = query_workflow_health_rows(
+        session,
+        workflow_id=workflow_id,
+    )
+    if health_rows:
+        return health_rows[0]
     raise ServiceError("workflow_not_found", "Workflow health was not found", 404)
 
 
