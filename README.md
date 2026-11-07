@@ -203,6 +203,7 @@ trusted origin in production.
 | `AI_BASE_URL` | `https://api.openai.com/v1` | Trusted OpenAI-compatible provider base URL |
 | `AI_MODEL` | `gpt-4.1-mini` | Model expected to support strict JSON-schema output |
 | `FLOWMEDIC_API_KEY` | empty | Optional internal service token; user sessions are independently required |
+| `DIAGNOSE_RATE_LIMIT_PER_MINUTE` | `5` | Per-caller limit on `diagnose`; in-memory, per process |
 | `DEMO_MODE` | `false` | Enables the synthetic, credentials-free demo; cannot be combined with n8n or AI keys |
 | `CORS_ALLOW_ORIGINS` | local dashboard origins | Comma-separated frontend origins permitted by FastAPI |
 | `MONITOR_POLL_INTERVAL_SECONDS` | `60` | Read-only polling cadence; 10–3600 seconds |
@@ -267,7 +268,7 @@ by default; `API_DOCS_ENABLED=true` enables them for private development only.
 | `POST` | `/api/v1/incidents/sync` | Explicitly ingest failures into persistent incidents |
 | `GET` | `/api/v1/incidents` | List persisted incidents with offset pagination |
 | `GET` | `/api/v1/incidents/{incident_id}` | Read one incident |
-| `POST` | `/api/v1/incidents/{incident_id}/diagnose` | Generate and persist an advisory diagnosis |
+| `POST` | `/api/v1/incidents/{incident_id}/diagnose` | Generate and persist an advisory diagnosis; an existing diagnosis requires `?force=true` (409 otherwise) |
 | `GET`, `POST`, `PATCH` | `/api/v1/alerts/rules` | View or explicitly configure mock or configured-webhook alert rules |
 | `GET` | `/api/v1/alerts/events` | View persisted alert-event history |
 | `GET` | `/api/v1/alerts/events/{event_id}/deliveries` | View safe, persisted delivery attempts |

@@ -17,6 +17,7 @@ from app.core.config import Settings
 from app.core.database import create_database
 from app.core.encryption import ConnectionCipher
 from app.core.errors import ServiceError
+from app.core.ratelimit import RateLimiter
 from app.core.security import BodySizeLimitMiddleware
 from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
 from app.demo import DEMO_INSTANCE_ID, demo_failure, ensure_demo_instance, seed_demo_history
@@ -194,6 +195,7 @@ def create_app(
         openapi_url="/openapi.json" if config.api_docs_enabled else None,
     )
     app.state.settings = config
+    app.state.diagnose_limiter = RateLimiter(config.diagnose_rate_limit_per_minute, 60)
 
     @app.middleware("http")
     async def readonly_public_demo(request: Request, call_next):
@@ -205,6 +207,8 @@ def create_app(
     async def authentication(request: Request, call_next):
         key = config.flowmedic_api_key.get_secret_value()
         request.state.service_authenticated = False
+        # User sessions (plus CSRF) authorize business mutations; the optional bearer
+        # token only authenticates the internal service boundary.
         if key and request.url.path != "/health" and request.method != "OPTIONS":
             expected = ("Bearer " + key).encode()
             supplied = request.headers.get("Authorization", "").encode()
@@ -257,7 +261,8 @@ def create_app(
     app.include_router(
         router,
         responses={
-            status: {"model": ErrorResponse} for status in (401, 404, 422, 500, 502, 503, 504)
+            status: {"model": ErrorResponse}
+            for status in (401, 404, 409, 422, 429, 500, 502, 503, 504)
         },
     )
     app.add_middleware(

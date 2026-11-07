@@ -539,9 +539,20 @@ def diagnosis_provider(request: Request, workspace_id: str):
 
 
 @router.post("/incidents/{incident_id}/diagnose", response_model=IncidentOut)
-async def diagnose(incident_id: UUID, request: Request, session: DB):
+async def diagnose(incident_id: UUID, request: Request, session: DB, force: bool = False):
     require_admin(request)
     incident = require_incident(session, incident_id)
+    if incident.diagnosis is not None and not force:
+        raise ServiceError(
+            "already_diagnosed",
+            "Incident already has a diagnosis; pass force=true to re-diagnose",
+            409,
+        )
+    caller = request.state.auth.user_id or (
+        request.client.host if request.client else "unknown"
+    )
+    if not request.app.state.diagnose_limiter.allow(caller):
+        raise ServiceError("rate_limited", "Too many diagnosis requests; try again shortly", 429)
     provider, snapshot = diagnosis_provider(request, session.workspace_id)
     context = Failure.model_validate(incident, from_attributes=True)
     session.commit()

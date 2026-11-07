@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     auth_session_seconds: int = Field(default=43200, ge=300, le=604800)
     auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
     api_docs_enabled: bool = False
+    diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
     demo_mode: bool = False
     public_demo_readonly: bool = False
     cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"

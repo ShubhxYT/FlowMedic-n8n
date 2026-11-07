@@ -8,6 +8,13 @@ from app.core.config import Settings
 from app.main import create_app
 
 
+@pytest.fixture(autouse=True)
+def _allow_unauthenticated_mutations(monkeypatch):
+    # Most tests exercise routes without a key. Tests of the fail-closed default pass
+    # allow_unauthenticated_mutations=False explicitly (init kwargs override the environment).
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_MUTATIONS", "true")
+
+
 @pytest.fixture
 def execution():
     return {

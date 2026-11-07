@@ -98,7 +98,10 @@ export const api = {
   incidents: (id: string | null = null, limit = 50, offset = 0) =>
     request<IncidentPage>(scopedPath("/api/v1/incidents", id, {limit: String(limit), offset: String(offset)})),
   incident: (id: string) => request<Incident>(`/api/v1/incidents/${id}`),
-  diagnose: (id: string) => request<Incident>(`/api/v1/incidents/${id}/diagnose`, { method: "POST" }),
+  diagnose: (id: string, force = false) =>
+    request<Incident>(`/api/v1/incidents/${id}/diagnose${force ? "?force=true" : ""}`, {
+      method: "POST",
+    }),
 };
 
 function scopedPath(path: string, instanceId: string | null, extra?: Record<string, string>): string {

@@ -48,7 +48,9 @@ Deploy behind a TLS reverse proxy with the cookie/CSRF settings below. An option
 `FLOWMEDIC_API_KEY` authenticates the internal service boundary independently of the user.
 Authentication attempts are throttled and minimal account/business actions are audited.
 Diagnosing an incident requires admin permission, replaces its last diagnosis, and can incur
-another provider charge. Provider secrets remain in infrastructure environment variables.
+another provider charge. Re-diagnosing requires `?force=true`; diagnosis calls are rate limited
+per caller in memory (per process). The optional `FLOWMEDIC_API_KEY` is not a substitute for a
+user session. Provider secrets remain in infrastructure environment variables.
 
 ## Public demo mode
 
