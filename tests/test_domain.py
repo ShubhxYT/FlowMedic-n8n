@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 import pytest
+from auth_support import legacy_factory
 from pydantic import ValidationError
 
 from app.ai.providers import CompatibleAIProvider, MockDiagnosisProvider
@@ -49,6 +50,7 @@ def test_normalization_and_persistence(execution):
     assert "private-value" not in failure.model_dump_json()
     engine, factory = create_database("sqlite:///:memory:")
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     with factory() as session:
         incident, created = IncidentRepository(session).create_once(failure)
         assert created

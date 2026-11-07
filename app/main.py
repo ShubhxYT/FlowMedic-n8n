@@ -16,8 +16,10 @@ from app.core.config import Settings
 from app.core.database import create_database
 from app.core.errors import ServiceError
 from app.core.migrations import upgrade_database
+from app.core.workspaces import WorkspaceFactory, ensure_reserved_workspaces
 from app.demo import demo_failure, seed_demo_history
 from app.integrations.n8n.client import N8nClient
+from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID
 from app.models.incident import Base
 from app.repositories.incidents import IncidentRepository
 from app.schemas.domain import ErrorResponse
@@ -55,7 +57,11 @@ def create_app(
         else:
             upgrade_database(config.database_url)
             engine, factory = create_database(config.database_url)
+        ensure_reserved_workspaces(factory)
         app.state.session_factory = factory
+        integration_factory = WorkspaceFactory(
+            factory, DEMO_WORKSPACE_ID if config.demo_mode else LEGACY_WORKSPACE_ID
+        )
         app.state.monitoring = None
         providers = {"mock": MockAlertDeliveryProvider()}
         if config.alert_webhook_url and not config.demo_mode:
@@ -65,7 +71,7 @@ def create_app(
                 signing_secret=config.alert_webhook_signing_secret.get_secret_value(),
                 transport=webhook_transport,
             )
-        app.state.alerts = AlertService(config, factory, providers=providers)
+        app.state.alerts = AlertService(config, integration_factory, providers=providers)
         try:
             async with (
                 httpx.AsyncClient(transport=n8n_transport, follow_redirects=False) as n8n_http,
@@ -78,7 +84,7 @@ def create_app(
                     else MockDiagnosisProvider()
                 )
                 if config.demo_mode:
-                    with factory() as session:
+                    with integration_factory() as session:
                         failure = demo_failure()
                         incident, _ = IncidentRepository(session).create_once(failure)
                         if incident.diagnosis is None:
@@ -93,7 +99,7 @@ def create_app(
                         session.commit()
                 app.state.monitoring = MonitoringService(
                     config,
-                    factory,
+                    integration_factory,
                     app.state.n8n,
                     alerts=app.state.alerts,
                 )
@@ -133,6 +139,14 @@ def create_app(
                 return error_response("unauthorized", "A valid bearer token is required", 401)
             request.state.service_authenticated = True
         response = await call_next(request)
+        if request.method in {"POST", "PATCH", "DELETE"} and response.status_code >= 400:
+            context = getattr(request.state, "auth", None)
+            if context is not None:
+                from app.services.auth import audit
+
+                with app.state.session_factory() as session:
+                    audit(session, context, "request.mutation", "denied")
+                    session.commit()
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         return response

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.core.errors import ServiceError
 from app.core.security import sanitize
+from app.core.workspaces import require_environment_factory
 from app.integrations.n8n.client import Execution, ExecutionPage, is_failed
 from app.repositories.incidents import IncidentRepository
 from app.repositories.monitoring import ExecutionHistoryRepository, MonitoringRepository, is_expired
@@ -40,6 +41,7 @@ class MonitoringService:
 
     def __init__(self, settings, session_factory, n8n, alerts=None):
         self.settings = settings
+        self.workspace_id = require_environment_factory(session_factory)
         self.session_factory = session_factory
         self.n8n = n8n
         self.alerts = alerts
@@ -90,7 +92,7 @@ class MonitoringService:
                 try:
                     await self.sync()
                 except Exception:
-                    logger.exception("monitoring_loop_iteration_failed")
+                    logger.warning("monitoring_loop_iteration_failed")
         finally:
             if not self._stopping:
                 logger.error("monitoring_loop_exited_unexpectedly")
@@ -159,7 +161,7 @@ class MonitoringService:
                 )
                 self._state = "degraded"
                 self._evaluate_alerts(monitoring_state="degraded")
-                logger.exception("monitoring_poll_failed code=monitoring_error")
+                logger.warning("monitoring_poll_failed code=monitoring_error")
                 return MonitoringSyncResult(status="failed")
             finally:
                 self._release_lease()
@@ -372,7 +374,7 @@ class MonitoringService:
                 self.alerts.evaluate_workflow_health()
         except Exception:
             # Alerting must never prevent read-only monitoring persistence.
-            logger.exception("alert_evaluation_failed")
+            logger.warning("alert_evaluation_failed")
 
     def _heartbeat_lease(self) -> None:
         with self.session_factory() as session:

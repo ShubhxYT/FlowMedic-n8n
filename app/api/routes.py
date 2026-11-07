@@ -6,8 +6,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import current_context
 from app.core.errors import ServiceError
 from app.core.security import sanitize
+from app.core.workspaces import WorkspaceFactory
+from app.models.auth import DEMO_WORKSPACE_ID, LEGACY_WORKSPACE_ID
 from app.models.incident import AlertRule, ExecutionHistory, Incident
 from app.repositories.alerts import AlertEventRepository, AlertRuleRepository
 from app.repositories.incidents import IncidentRepository
@@ -36,18 +39,59 @@ from app.schemas.domain import (
 from app.services.health import build_workflow_health, global_recent_counts
 from app.services.incidents import normalize
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(current_context)])
 logger = logging.getLogger(__name__)
 Limit = Annotated[int, Query(ge=1, le=100)]
 Cursor = Annotated[str | None, Query(max_length=2048)]
 
 
 def get_session(request: Request):
-    with request.app.state.session_factory() as session:
+    context = request.state.auth
+    with WorkspaceFactory(
+        request.app.state.session_factory, context.workspace_id, context.user_id
+    )() as session:
         yield session
 
 
 DB = Annotated[Session, Depends(get_session)]
+
+
+def environment_workspace(request):
+    expected = DEMO_WORKSPACE_ID if request.app.state.settings.demo_mode else LEGACY_WORKSPACE_ID
+    return request.state.auth.workspace_id == expected
+
+
+def require_admin(request: Request):
+    context = request.state.auth
+    models_by_parameter = {"incident_id": Incident, "rule_id": AlertRule}
+    for parameter, model in models_by_parameter.items():
+        object_id = request.path_params.get(parameter)
+        if object_id:
+            try:
+                UUID(object_id)
+            except ValueError:
+                continue  # Let FastAPI return its normal fixed validation error.
+            with WorkspaceFactory(
+                request.app.state.session_factory, context.workspace_id
+            )() as session:
+                if session.get(model, object_id) is None:
+                    raise ServiceError("not_found", "Object was not found", 404)
+    if request.state.auth.role != "admin":
+        raise ServiceError("forbidden", "Workspace admin permission is required", 403)
+
+
+def require_admin_environment(request: Request):
+    require_admin(request)
+    if not environment_workspace(request):
+        raise ServiceError(
+            "workspace_unconfigured", "Configure this workspace before using integrations", 409
+        )
+
+
+def provider_available(request, provider):
+    if not environment_workspace(request):
+        return provider == "mock"
+    return request.app.state.alerts.provider_available(provider)
 
 
 def secrets(request):
@@ -64,6 +108,8 @@ def secrets(request):
 
 @router.get("/n8n/status")
 async def n8n_status(request: Request) -> dict[str, bool]:
+    if not environment_workspace(request):
+        return {"connected": False}
     return await request.app.state.n8n.connectivity()
 
 
@@ -72,18 +118,37 @@ def system_status(request: Request) -> SystemStatus:
     config = request.app.state.settings
     database_engine = config.database_url.split(":", 1)[0].lower()
     return SystemStatus(
-        n8n_configured=bool(config.n8n_base_url and config.n8n_api_key.get_secret_value()),
-        ai_mode="configured" if config.ai_api_key.get_secret_value() else "mock",
+        n8n_configured=environment_workspace(request)
+        and bool(config.n8n_base_url and config.n8n_api_key.get_secret_value()),
+        ai_mode="configured"
+        if environment_workspace(request) and config.ai_api_key.get_secret_value()
+        else "mock",
         database_engine=database_engine,
     )
 
 
 @router.get("/monitoring/status", response_model=MonitoringStatus)
 def monitoring_status(request: Request) -> MonitoringStatus:
+    if not environment_workspace(request):
+        return MonitoringStatus(
+            enabled=False,
+            state="disabled",
+            poll_interval_seconds=60,
+            last_checked_at=None,
+            last_successful_sync_at=None,
+            last_error_at=None,
+            last_error_summary=None,
+            consecutive_failure_count=0,
+            retention_days=request.app.state.settings.execution_history_retention_days,
+        )
     return request.app.state.monitoring.status()
 
 
-@router.post("/monitoring/sync", response_model=MonitoringSyncResult)
+@router.post(
+    "/monitoring/sync",
+    response_model=MonitoringSyncResult,
+    dependencies=[Depends(require_admin_environment)],
+)
 async def monitoring_sync(request: Request) -> MonitoringSyncResult:
     return await request.app.state.monitoring.sync()
 
@@ -98,7 +163,7 @@ def workflow_health_rows(session: Session) -> list[WorkflowHealth]:
 def overview_metrics(request: Request, session: DB) -> OverviewMetrics:
     workflows = workflow_health_rows(session)
     successes, failures = global_recent_counts(session.scalars(select(ExecutionHistory)).all())
-    monitoring = request.app.state.monitoring.status()
+    monitoring = monitoring_status(request)
     return OverviewMetrics(
         monitored_workflow_count=len(workflows),
         healthy_workflow_count=sum(item.health == "healthy" for item in workflows),
@@ -132,6 +197,8 @@ def workflow_health(workflow_id: str, session: DB) -> WorkflowHealth:
 
 @router.get("/workflows", response_model=WorkflowPage)
 async def workflows(request: Request, limit: Limit = 50, cursor: Cursor = None):
+    if not environment_workspace(request):
+        return WorkflowPage(data=[], next_cursor=None)
     page = await request.app.state.n8n.workflows(limit, cursor)
     return WorkflowPage(
         data=[
@@ -148,6 +215,8 @@ async def workflows(request: Request, limit: Limit = 50, cursor: Cursor = None):
 
 @router.get("/executions/failed", response_model=FailurePage)
 async def failed_executions(request: Request, limit: Limit = 50, cursor: Cursor = None):
+    if not environment_workspace(request):
+        return FailurePage(data=[], next_cursor=None)
     failures, next_cursor, _ = await request.app.state.n8n.failed_executions(limit, cursor)
     return FailurePage(
         data=[normalize(item, secrets(request)) for item in failures],
@@ -155,7 +224,9 @@ async def failed_executions(request: Request, limit: Limit = 50, cursor: Cursor 
     )
 
 
-@router.post("/incidents/sync", response_model=SyncResult)
+@router.post(
+    "/incidents/sync", response_model=SyncResult, dependencies=[Depends(require_admin_environment)]
+)
 async def sync_incidents(request: Request, session: DB, limit: Limit = 50, cursor: Cursor = None):
     failures, next_cursor, scanned = await request.app.state.n8n.failed_executions(limit, cursor)
     repository = IncidentRepository(session)
@@ -181,12 +252,17 @@ def alert_rules(session: DB) -> AlertRulePage:
     return AlertRulePage(data=AlertRuleRepository(session).list_rules())
 
 
-@router.post("/alerts/rules", response_model=AlertRuleOut, status_code=201)
+@router.post(
+    "/alerts/rules",
+    response_model=AlertRuleOut,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
 def create_alert_rule(request: Request, payload: AlertRuleCreate, session: DB) -> AlertRuleOut:
     existing = session.scalar(select(AlertRule).where(AlertRule.name == payload.name))
     if existing is not None:
         raise ServiceError("alert_rule_exists", "An alert rule with this name already exists", 409)
-    if not request.app.state.alerts.provider_available(payload.delivery_provider):
+    if not provider_available(request, payload.delivery_provider):
         raise ServiceError(
             "alert_provider_not_configured",
             "The selected alert delivery provider is not configured",
@@ -200,7 +276,9 @@ def create_alert_rule(request: Request, payload: AlertRuleCreate, session: DB) -
     return rule
 
 
-@router.patch("/alerts/rules/{rule_id}", response_model=AlertRuleOut)
+@router.patch(
+    "/alerts/rules/{rule_id}", response_model=AlertRuleOut, dependencies=[Depends(require_admin)]
+)
 def update_alert_rule(
     request: Request, rule_id: UUID, payload: AlertRuleUpdate, session: DB
 ) -> AlertRuleOut:
@@ -215,9 +293,7 @@ def update_alert_rule(
             raise ServiceError(
                 "alert_rule_exists", "An alert rule with this name already exists", 409
             )
-    if values.get("enabled") and not request.app.state.alerts.provider_available(
-        rule.delivery_provider
-    ):
+    if values.get("enabled") and not provider_available(request, rule.delivery_provider):
         raise ServiceError(
             "alert_provider_not_configured",
             "The selected alert delivery provider is not configured",
@@ -274,7 +350,11 @@ def incident(incident_id: UUID, session: DB):
     return require_incident(session, incident_id)
 
 
-@router.post("/incidents/{incident_id}/diagnose", response_model=IncidentOut)
+@router.post(
+    "/incidents/{incident_id}/diagnose",
+    response_model=IncidentOut,
+    dependencies=[Depends(require_admin_environment)],
+)
 async def diagnose(incident_id: UUID, request: Request, session: DB):
     incident = require_incident(session, incident_id)
     context = Failure.model_validate(incident, from_attributes=True)

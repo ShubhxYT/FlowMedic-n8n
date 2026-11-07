@@ -2,12 +2,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.workspaces import require_workspace
 from app.models.incident import Incident
 from app.schemas.domain import Failure
 
 
 class IncidentRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def get(self, incident_id):

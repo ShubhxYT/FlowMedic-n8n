@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from auth_support import OperatorClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -68,7 +68,9 @@ def test_missing_incident(client):
 
 
 def test_missing_configuration():
-    with TestClient(create_app(Settings(_env_file=None, database_url="sqlite:///:memory:"))) as c:
+    with OperatorClient(
+        create_app(Settings(_env_file=None, database_url="sqlite:///:memory:"))
+    ) as c:
         assert c.get("/health").status_code == 200
         response = c.get("/api/v1/n8n/status")
         assert response.status_code == 503
@@ -77,7 +79,7 @@ def test_missing_configuration():
 
 def test_system_status_and_frontend_cors():
     settings = Settings(_env_file=None, database_url="sqlite:///:memory:")
-    with TestClient(create_app(settings)) as c:
+    with OperatorClient(create_app(settings)) as c:
         response = c.get("/api/v1/system/status")
         assert response.json() == {
             "n8n_configured": False,
@@ -99,19 +101,20 @@ def test_bearer_authentication():
     settings = Settings(
         _env_file=None, database_url="sqlite:///:memory:", flowmedic_api_key="local"
     )
-    with TestClient(create_app(settings)) as c:
+    with OperatorClient(create_app(settings)) as c:
         assert c.get("/health").status_code == 200
+        c.cookies.clear()
         assert c.get("/api/v1/incidents").status_code == 401
         assert (
-            c.get("/api/v1/incidents", headers={"Authorization": "Bearer local"}).status_code == 200
+            c.get("/api/v1/incidents", headers={"Authorization": "Bearer local"}).status_code == 401
         )
 
 
 def test_demo_mode_seeds_a_diagnosed_synthetic_incident():
     settings = Settings(_env_file=None, database_url="sqlite:///:memory:", demo_mode=True)
-    with TestClient(create_app(settings)) as c:
+    with OperatorClient(create_app(settings)) as c:
         index = c.get("/").json()
-        assert index == {"service": "FlowMedic AI", "docs": "/docs", "demo": "/api/v1/demo"}
+        assert index == {"service": "FlowMedic AI", "docs": None, "demo": "/api/v1/demo"}
         demo = c.get("/api/v1/demo")
         assert demo.status_code == 200
         assert demo.json()["diagnosis_provider"] == "mock"
@@ -137,7 +140,7 @@ def test_upstream_failure_has_safe_error():
         n8n_api_key="secret",
     )
     transport = httpx.MockTransport(lambda r: httpx.Response(401, text="secret stack trace"))
-    with TestClient(create_app(settings, n8n_transport=transport)) as c:
+    with OperatorClient(create_app(settings, n8n_transport=transport)) as c:
         response = c.get("/api/v1/n8n/status")
         assert response.status_code == 502
         assert "secret" not in response.text

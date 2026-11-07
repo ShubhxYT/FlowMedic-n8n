@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy import select
 
+from app.core.workspaces import require_environment_factory
 from app.models.incident import ExecutionHistory, Incident
 from app.repositories.alerts import (
     AlertConditionStateRepository,
@@ -143,6 +144,7 @@ class AlertService:
         providers: dict[str, AlertDeliveryProvider] | None = None,
     ):
         self.settings = settings
+        self.workspace_id = require_environment_factory(session_factory)
         self.session_factory = session_factory
         self.providers = providers or {"mock": provider or MockAlertDeliveryProvider()}
 

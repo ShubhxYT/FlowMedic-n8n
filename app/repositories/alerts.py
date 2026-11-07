@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.workspaces import require_workspace
 from app.models.incident import (
     AlertConditionState,
     AlertDeliveryAttempt,
@@ -18,6 +19,7 @@ def utc_now() -> datetime:
 
 class AlertRuleRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def list_rules(self) -> list[AlertRule]:
@@ -52,6 +54,7 @@ class AlertRuleRepository:
 
 class AlertEventRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def list_events(self, limit: int, offset: int) -> list[AlertEvent]:
@@ -157,6 +160,7 @@ class AlertEventRepository:
 
 class AlertConditionStateRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def transition(self, condition_type: str, scope_key: str, current_state: str) -> bool:

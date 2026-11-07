@@ -2,7 +2,7 @@ import copy
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from auth_support import OperatorClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -63,5 +63,5 @@ def client(execution):
         n8n_base_url="https://n8n.example",
         n8n_api_key="test-n8n-key",
     )
-    with TestClient(create_app(settings, n8n_transport=httpx.MockTransport(handler))) as result:
+    with OperatorClient(create_app(settings, n8n_transport=httpx.MockTransport(handler))) as result:
         yield result

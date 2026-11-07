@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from auth_support import legacy_factory
 from pydantic import ValidationError
 from sqlalchemy import select
 
@@ -15,6 +16,7 @@ from app.core.config import Settings
 from app.core.database import create_database
 from app.core.errors import ServiceError
 from app.integrations.n8n.client import Execution
+from app.models.auth import LEGACY_WORKSPACE_ID
 from app.models.incident import AlertEvent, Base, Incident
 from app.repositories.alerts import AlertEventRepository, AlertRuleRepository
 from app.schemas.domain import AlertRuleCreate, AlertRuleOut
@@ -40,6 +42,7 @@ def service_with_webhook(
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     provider = WebhookAlertDeliveryProvider(
         settings.alert_webhook_url,
         timeout_seconds=settings.alert_webhook_timeout_seconds,
@@ -234,9 +237,11 @@ def test_webhook_rule_is_rejected_when_provider_is_not_configured(tmp_path):
     settings = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'api.db'}")
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     service = AlertService(settings, factory)
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings))
+        state=SimpleNamespace(auth=SimpleNamespace(workspace_id=LEGACY_WORKSPACE_ID, role="admin")),
+        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings)),
     )
     with factory() as session, pytest.raises(ServiceError) as error:
         create_alert_rule(
@@ -265,6 +270,7 @@ def test_demo_mode_never_invokes_a_configured_webhook(tmp_path):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     provider = WebhookAlertDeliveryProvider(
         PUBLIC_WEBHOOK_URL,
         timeout_seconds=5,
@@ -287,12 +293,14 @@ def test_rule_api_exposes_provider_but_never_webhook_secret(tmp_path):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     provider = WebhookAlertDeliveryProvider(
         PUBLIC_WEBHOOK_URL, timeout_seconds=5, signing_secret=secret
     )
     service = AlertService(settings, factory, providers={"webhook": provider})
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings))
+        state=SimpleNamespace(auth=SimpleNamespace(workspace_id=LEGACY_WORKSPACE_ID, role="admin")),
+        app=SimpleNamespace(state=SimpleNamespace(alerts=service, settings=settings)),
     )
     with factory() as session:
         response = create_alert_rule(
@@ -339,9 +347,10 @@ def test_webhook_failure_does_not_break_committed_manual_incident_sync(tmp_path)
             )
 
     request = SimpleNamespace(
+        state=SimpleNamespace(auth=SimpleNamespace(workspace_id=LEGACY_WORKSPACE_ID, role="admin")),
         app=SimpleNamespace(
             state=SimpleNamespace(settings=service.settings, n8n=FakeN8n(), alerts=service)
-        )
+        ),
     )
     with factory() as session:
         response = asyncio.run(sync_incidents(request, session))

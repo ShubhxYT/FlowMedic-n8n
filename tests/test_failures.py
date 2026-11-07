@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from auth_support import OperatorClient
 
 from app.core.config import Settings
 from app.integrations.n8n.client import N8nClient
@@ -53,7 +53,7 @@ def test_ai_failure_does_not_mark_incident_diagnosed(execution, failure):
         n8n_transport=httpx.MockTransport(n8n_handler),
         ai_transport=httpx.MockTransport(ai_handler),
     )
-    with TestClient(app) as client:
+    with OperatorClient(app) as client:
         assert client.post("/api/v1/incidents/sync").status_code == 200
         incident_id = client.get("/api/v1/incidents").json()["data"][0]["id"]
         path = "/api/v1/incidents/" + incident_id

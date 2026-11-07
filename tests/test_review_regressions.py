@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from auth_support import legacy_factory
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -46,6 +47,7 @@ def test_monitoring_updates_running_execution_and_sanitizes_name():
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     service = MonitoringService(settings, factory, None)
     try:
         execution = Execution(
@@ -99,6 +101,7 @@ def test_workflow_names_are_redacted_before_history_persistence():
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     try:
         service = MonitoringService(settings, factory, None)
         service._persist_entries(

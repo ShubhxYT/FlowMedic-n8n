@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from alembic.config import Config
-from sqlalchemy import inspect, select
+from auth_support import legacy_factory
+from sqlalchemy import MetaData, Table, inspect, select
 
 from alembic import command
 from app.api.routes import sync_incidents
@@ -44,6 +45,7 @@ def service_with_database(tmp_path, *, provider=None, demo_mode=False, retries=3
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     return AlertService(settings, factory, provider), factory
 
 
@@ -293,6 +295,7 @@ def test_manual_incident_sync_succeeds_when_alert_evaluation_fails(tmp_path):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -331,16 +334,16 @@ def test_alerting_migration_preserves_pre_phase_four_incident_data(tmp_path):
         "status": "open",
         "severity": "high",
     }
-    with factory() as session:
-        session.add(
-            Incident(
+    with engine.begin() as connection:
+        table = Table("incidents", MetaData(), autoload_with=connection)
+        connection.execute(
+            table.insert().values(
                 **original,
                 execution_timestamp=datetime(2026, 9, 1, tzinfo=UTC),
                 diagnosis=None,
                 diagnosis_provider=None,
             )
         )
-        session.commit()
 
     upgrade_database(database_url)
     tables = set(inspect(engine).get_table_names())

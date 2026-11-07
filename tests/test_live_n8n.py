@@ -3,7 +3,7 @@
 import os
 
 import pytest
-from fastapi.testclient import TestClient
+from auth_support import OperatorClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -29,7 +29,7 @@ def test_manual_monitoring_sync_is_read_only_and_idempotent(tmp_path):
         _env_file=None,
         database_url=f"sqlite:///{tmp_path / 'live-validation.db'}",
     )
-    with TestClient(create_app(settings)) as client:
+    with OperatorClient(create_app(settings)) as client:
         first = client.post("/api/v1/monitoring/sync")
         second = client.post("/api/v1/monitoring/sync")
         status = client.get("/api/v1/monitoring/status")

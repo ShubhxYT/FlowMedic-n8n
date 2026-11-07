@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta
 
+from auth_support import legacy_factory
 from sqlalchemy import create_engine, inspect, select
 
 from app.core.config import Settings
@@ -56,6 +57,7 @@ def service_with_database(tmp_path, n8n):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     return MonitoringService(settings, factory, n8n), factory
 
 
@@ -148,6 +150,7 @@ def test_retention_removes_only_old_history_and_health_uses_retained_window(tmp_
                 diagnosis_provider=None,
             )
             session.add(incident)
+            session.flush()
             session.add(
                 ExecutionHistory(
                     source="n8n",

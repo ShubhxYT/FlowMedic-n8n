@@ -3,7 +3,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
-from fastapi.testclient import TestClient
+from auth_support import OperatorClient, legacy_factory
 from sqlalchemy import create_engine, inspect, text
 
 from app.core.config import Settings
@@ -18,7 +18,7 @@ from app.services.monitoring import MonitoringService
 
 def test_monitoring_is_disabled_without_n8n_configuration():
     settings = Settings(_env_file=None, database_url="sqlite:///:memory:")
-    with TestClient(create_app(settings)) as client:
+    with OperatorClient(create_app(settings)) as client:
         status = client.get("/api/v1/monitoring/status").json()
         assert status["enabled"] is False
         assert status["state"] == "disabled"
@@ -39,7 +39,7 @@ def test_monitoring_background_task_starts_once_and_stops_cleanly(execution):
         monitor_poll_interval_seconds=60,
     )
     app = create_app(settings, n8n_transport=httpx.MockTransport(handler))
-    with TestClient(app):
+    with OperatorClient(app):
         task = app.state.monitoring._task
         assert task is not None
         assert task.get_name() == "flowmedic-monitor"
@@ -112,6 +112,7 @@ def _service(fake, **settings_values):
     )
     engine, factory = create_database(settings.database_url)
     Base.metadata.create_all(engine)
+    factory = legacy_factory(factory)
     return MonitoringService(settings, factory, fake)
 
 

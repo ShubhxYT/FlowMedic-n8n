@@ -4,6 +4,7 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.workspaces import require_workspace
 from app.models.incident import ExecutionHistory, MonitoringCheckpoint
 
 
@@ -20,6 +21,7 @@ def is_expired(value: datetime | None, now: datetime | None = None) -> bool:
 
 class MonitoringRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def checkpoint(self, source: str, source_identifier: str) -> MonitoringCheckpoint:
@@ -135,6 +137,7 @@ class MonitoringRepository:
 
 class ExecutionHistoryRepository:
     def __init__(self, session: Session):
+        self.workspace_id = require_workspace(session)
         self.session = session
 
     def create_once(self, **values) -> tuple[ExecutionHistory, bool]:
