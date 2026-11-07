@@ -65,7 +65,8 @@ class MonitoringService:
             return False
         if self._last_poller_beat is None:
             return True  # Just started, hasn't ticked yet
-        # If the task hasn't updated its beat within 3x the poll interval + 10s grace, it's considered dead/stuck
+        # A task that has not updated its beat within 3x the poll interval + 10s grace
+        # is considered dead or stuck.
         threshold = timedelta(seconds=(self.settings.monitor_poll_interval_seconds * 3) + 10)
         return utc_now() - self._last_poller_beat < threshold
 
@@ -97,7 +98,7 @@ class MonitoringService:
                     await asyncio.sleep(self.settings.monitor_poll_interval_seconds)
                 except asyncio.CancelledError:
                     raise
-                
+
                 if self._stopping:
                     break
 
@@ -105,7 +106,8 @@ class MonitoringService:
                     await self.sync()
                 except Exception:
                     logger.exception("monitoring_loop_iteration_failed")
-                    # Backoff slightly on unexpected top-level loop crashes to prevent tight error loops
+                    # Back off slightly on unexpected top-level loop crashes to avoid
+                    # a tight error loop.
                     await asyncio.sleep(min(self.settings.monitor_poll_interval_seconds, 5))
         except asyncio.CancelledError:
             raise
@@ -131,7 +133,12 @@ class MonitoringService:
 
             # Determine actual runtime state incorporating poller liveness
             current_state = "disabled" if not self.enabled else self._state
-            if self.enabled and current_state != "disabled" and not self.poller_alive and self._task is not None:
+            if (
+                self.enabled
+                and current_state != "disabled"
+                and not self.poller_alive
+                and self._task is not None
+            ):
                 current_state = "unhealthy"
 
             return MonitoringStatus(
