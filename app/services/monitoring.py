@@ -73,6 +73,8 @@ class MonitoringService:
         return True
 
     async def start(self) -> None:
+        if not self.enabled:
+            return
         if self._task is not None and not self._task.done():
             return
         self._stopping = False
@@ -98,6 +100,8 @@ class MonitoringService:
         logger.info("monitoring_loop_stopped instance_id=%s", self.instance_id)
 
     async def _loop(self) -> None:
+        # sync() handles its own failures, but the lease/alerts paths around it can
+        # still raise. A background poller must never die from one bad iteration.
         try:
             while not self._stopping:
                 try:
