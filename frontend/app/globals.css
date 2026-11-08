@@ -1,37 +1,37 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  --bg: #07111f;
-  --surface-1: #0c1829;
-  --surface-2: #102037;
-  --surface-3: #162b47;
-  --border: #213652;
-  --border-strong: #35537a;
-  --field-border: #5f82b0;
+  --bg: #f7f7f2;
+  --surface-1: #fffefa;
+  --surface-2: #f0f3eb;
+  --surface-3: #e3ece0;
+  --border: #dde2d7;
+  --border-strong: #b5c5b7;
+  --field-border: #95ad9f;
 
-  --text: #e7edf7;
-  --text-strong: #f5f8ff;
-  --text-muted: #a5b5ca;
-  --text-subtle: #8a9db7;
+  --text: #172a24;
+  --text-strong: #172a24;
+  --text-muted: #51635a;
+  --text-subtle: #51635a;
 
-  --accent: #63a8ff;
-  --accent-solid: #1d4f87;
-  --accent-solid-hover: #2460a1;
-  --ok: #4ee3b1;
-  --ok-fg: #a6f5d8;
-  --ok-bg: rgba(78, 227, 177, 0.14);
-  --warn: #f5bb57;
-  --warn-fg: #ffd797;
-  --warn-bg: rgba(245, 187, 87, 0.14);
-  --danger: #ff7a91;
-  --danger-fg: #ffc5d0;
+  --accent: #24594a;
+  --accent-solid: #194739;
+  --accent-solid-hover: #24594a;
+  --ok: #3b8d6d;
+  --ok-fg: #235544;
+  --ok-bg: #e8f1e8;
+  --warn: #b07b29;
+  --warn-fg: #73490f;
+  --warn-bg: #f7eedb;
+  --danger: #a13e37;
+  --danger-fg: #8b302b;
   --danger-bg: rgba(255, 92, 125, 0.15);
-  --info-fg: #b9d7ff;
+  --info-fg: #26545b;
   --info-bg: rgba(99, 168, 255, 0.15);
-  --neutral-fg: #c3cfdf;
-  --neutral-bg: rgba(145, 164, 188, 0.14);
+  --neutral-fg: #4a5951;
+  --neutral-bg: #eeefe9;
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -42,8 +42,8 @@
   --sidebar-w: 248px;
   --topbar-h: 64px;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-sans: "Manrope Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
 }
 
 html { background: var(--bg); }
@@ -177,7 +177,7 @@ button, input, select { font: inherit; }
   .button-secondary:active { background: var(--surface-2); }
 
   .filters { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
-  .field { min-width: 150px; min-height: 40px; padding: 0 12px; border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); background: #0a1728; font-size: 0.85rem; transition: border-color 0.15s; }
+  .field { min-width: 150px; min-height: 40px; padding: 0 12px; border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); background: #fffefa; font-size: 0.85rem; transition: border-color 0.15s; }
   .field::placeholder { color: var(--text-subtle); opacity: 1; }
   .field:hover { border-color: #7a9cc8; }
   .field:focus-visible { border-color: var(--accent); outline-offset: 0; }
@@ -189,7 +189,7 @@ button, input, select { font: inherit; }
   .detail-list div { padding: 12px 0; border-bottom: 1px solid var(--border); }
   .detail-list dt { color: var(--text-subtle); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
   .detail-list dd { margin: 6px 0 0; color: var(--text); font-size: 0.9rem; overflow-wrap: anywhere; }
-  .message-box { margin: 8px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); background: #091626; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .message-box { margin: 8px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); background: #f7eedb; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
   .diagnosis-grid { display: grid; margin: 16px 0 0; }
   .diagnosis-grid > div { padding: 14px 0; border-bottom: 1px solid var(--border); }
   .diagnosis-grid dt { color: var(--text-subtle); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }

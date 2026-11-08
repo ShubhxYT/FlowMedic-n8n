@@ -158,6 +158,18 @@ export interface AlertEvent {
   delivered_at: string | null;
 }
 
+export interface AlertDeliveryAttemptPage {
+  data: {
+    id: string;
+    provider: AlertDeliveryProvider;
+    attempt_number: number;
+    status: AlertDeliveryStatus;
+    error_summary: string | null;
+    started_at: string;
+    completed_at: string | null;
+  }[];
+}
+
 export interface AlertRulePage {
   data: AlertRule[];
 }
