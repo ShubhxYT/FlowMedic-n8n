@@ -11,4 +11,4 @@ USER flowmedic
 ENV DATABASE_URL=sqlite:////data/flowmedic.db
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log"]
+CMD ["sh", "-c", "python -c 'from app.core.config import Settings; from app.core.migrations import upgrade_database; upgrade_database(Settings().database_url)' && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log"]
