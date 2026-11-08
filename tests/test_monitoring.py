@@ -89,6 +89,42 @@ def test_workflow_health_endpoint_is_safe_for_missing_history(client):
     assert response.json()["error"]["code"] == "workflow_not_found"
 
 
+def test_oversized_execution_detail_is_skipped():
+    from app.integrations.n8n.client import Execution, ExecutionPage
+
+    class OversizedN8n(FakeN8n):
+        async def recent_executions(self, limit, cursor):
+            return ExecutionPage(
+                data=[
+                    Execution(id="large", workflowId="wf", status="error"),
+                    Execution(id="small", workflowId="wf", status="error"),
+                ],
+                nextCursor=None,
+            )
+
+        async def execution_details(self, execution_id):
+            if execution_id == "large":
+                raise ServiceError(
+                    "upstream_response_too_large", "Upstream response is too large", 502
+                )
+            return Execution(
+                id="small",
+                workflowId="wf",
+                status="error",
+                data={"resultData": {"error": {"message": "401 Unauthorized"}}},
+            )
+
+    async def run():
+        service = _service(OversizedN8n([]))
+        return await service.sync()
+
+    result = asyncio.run(run())
+    assert result.status == "completed"
+    assert result.executions_discovered == 2
+    assert result.history_records_created == 2
+    assert result.incidents_created == 1
+
+
 class FakeN8n:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -425,8 +461,8 @@ def test_missing_execution_detail_does_not_abort_mixed_fresh_page(monkeypatch):
     monkeypatch.setattr("app.services.monitoring.logger.warning", warning)
     asyncio.run(run())
     warning.assert_any_call(
-        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+        "monitoring_execution_detail_unavailable execution_id=%s code=%s",
         "gone",
-        404,
+        "n8n_http_error",
     )
     assert all("payload" not in str(call).lower() for call in warning.call_args_list)

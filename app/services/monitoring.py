@@ -394,12 +394,15 @@ class MonitoringService:
                 try:
                     entries.append(await self.n8n.execution_details(execution.id))
                 except ServiceError as exc:
-                    if exc.status_code not in {404, 410}:
+                    if (
+                        exc.status_code not in {404, 410}
+                        and exc.code != "upstream_response_too_large"
+                    ):
                         raise
                     logger.warning(
-                        "monitoring_execution_detail_unavailable execution_id=%s status_code=%s",
+                        "monitoring_execution_detail_unavailable execution_id=%s code=%s",
                         execution.id,
-                        exc.status_code,
+                        exc.code,
                     )
                     entries.append(
                         Execution(
