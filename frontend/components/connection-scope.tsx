@@ -19,7 +19,7 @@ interface Scope {
   refresh: () => Promise<void>;
 }
 
-const Context = createContext<Scope | null>(null);
+export const ConnectionScopeContext = createContext<Scope | null>(null);
 const changeEvent = "flowmedic-instance-selection";
 const emptySnapshot = () => "";
 
@@ -65,11 +65,11 @@ export function ConnectionScopeProvider({
     workspaceId, role, instanceId, instances: instances ?? [],
     loading: query.loading, setInstance, refresh: query.refresh,
   }), [workspaceId, role, instanceId, instances, query.loading, query.refresh, setInstance]);
-  return <Context.Provider value={value}>{children}</Context.Provider>;
+  return <ConnectionScopeContext.Provider value={value}>{children}</ConnectionScopeContext.Provider>;
 }
 
 export function useConnectionScope(): Scope {
-  const scope = useContext(Context);
+  const scope = useContext(ConnectionScopeContext);
   if (!scope) throw new Error("Connection scope requires an authenticated workspace");
   return scope;
 }

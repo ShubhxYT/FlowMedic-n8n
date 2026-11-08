@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   CurrentUser,
+  AlertDeliveryAttemptPage,
   AlertEventPage,
   AlertRulePage,
   HealthResponse,
@@ -93,6 +94,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "resolved" }),
     }),
+  alertDeliveries: (id: string) => request<AlertDeliveryAttemptPage>(`/api/v1/alerts/events/${encodeURIComponent(id)}/deliveries`),
   alertRules: () => request<AlertRulePage>("/api/v1/alerts/rules"),
   alertEvents: (id: string | null = null, limit = 50, offset = 0) =>
     request<AlertEventPage>(scopedPath("/api/v1/alerts/events", id, {limit: String(limit), offset: String(offset)})),

@@ -5,6 +5,7 @@ vi.mock("@/components/connection-scope", () => ({useConnectionScope: () => ({wor
 
 vi.mock("@/lib/api", () => ({
   api: {
+    monitoringStatus: vi.fn().mockResolvedValue({ items: [] }),
     incidents: vi.fn().mockResolvedValue({ data: [] }),
     overviewMetrics: vi.fn().mockResolvedValue({
       monitored_workflow_count: 0,
@@ -36,7 +37,7 @@ describe("OverviewPage", () => {
   it("renders an honest empty incident state", async () => {
     render(<OverviewPage />);
     expect(screen.getByRole("heading", { name: "Automation health" })).toBeInTheDocument();
-    expect(await screen.findByText("No incidents yet")).toBeInTheDocument();
-    expect(screen.getByText("disabled")).toBeInTheDocument();
+    expect(await screen.findByText("No unresolved incidents on this page")).toBeInTheDocument();
+    expect(screen.getByText("No monitoring data")).toBeInTheDocument();
   });
 });

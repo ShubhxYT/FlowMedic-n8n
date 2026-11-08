@@ -14,12 +14,12 @@ export default function SettingsPage() {
   const scope = useConnectionScope();
   const revisionKey = scope.instances.map(item => `${item.id}:${item.revision}`).join(",");
   const key = `${scope.workspaceId}:${scope.instanceId ?? "all"}:${revisionKey}`;
-  return <>
+  return <div className="dashboard-settings">
     <PageHeader eyebrow="System" title="Settings & connections" description="Connect your n8n instances and choose an AI provider for this workspace." />
     <div className="settings-grid connection-grid"><ConnectionSettings /></div>
     <SettingsStatus key={key} queryKey={key} />
     <WorkspaceMembers />
-  </>;
+  </div>;
 }
 
 function SettingsStatus({queryKey}: {queryKey: string}) {
