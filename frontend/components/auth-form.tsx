@@ -10,12 +10,13 @@ export function AuthForm({ mode, onSuccess }: {
 }) {
   const [ready, setReady] = useState(false);
   const [registration, setRegistration] = useState(false);
+  const [google, setGoogle] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let active = true;
     void api.csrf().then((value) => {
-      if (active) { setRegistration(value.registration_enabled); setReady(true); }
+      if (active) { setRegistration(value.registration_enabled); setGoogle(Boolean(value.google_enabled)); setReady(true); }
     }).catch(() => { if (active) setError("Account service is unavailable. Reload to try again."); });
     return () => { active = false; };
   }, []);
@@ -33,6 +34,17 @@ export function AuthForm({ mode, onSuccess }: {
       setError(reason instanceof Error ? reason.message : "Sign in failed");
     } finally { setBusy(false); }
   }
+  async function continueWithGoogle() {
+    setBusy(true); setError("");
+    try {
+      const { url } = await api.googleStart();
+      window.location.assign(url);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Google sign-in is unavailable");
+      setBusy(false);
+    }
+  }
+  const showGoogle = ready && google && (mode === "login" || registration);
   return <main className="mx-auto max-w-md p-8">
     <h1 className="text-2xl font-bold">{mode === "login" ? "Log in to FlowMedic" : "Create an account"}</h1>
     <p className="my-4">{mode === "signup" ? "Your account starts with a private workspace." : "Use your email and password to continue."}</p>
@@ -40,13 +52,19 @@ export function AuthForm({ mode, onSuccess }: {
     {mode === "signup" && ready && !registration && <p role="status">Registration is closed. Contact the operator.</p>}
     <form onSubmit={(event) => void submit(event)} className="grid gap-4">
       <label>Email<input className="block w-full rounded border p-2" name="email" type="email" required maxLength={254} autoComplete="username" /></label>
-      <label>Password<input className="block w-full rounded border p-2" name="password" type="password" required minLength={12} maxLength={128} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
+      <label>Password<input className="block w-full rounded border p-2" name="password" type="password" required minLength={mode === "signup" ? 12 : 1} maxLength={128} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
       <button className="button" disabled={!ready || busy || mode === "signup" && !registration}>
         {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
       </button>
     </form>
-    <p className="mt-4"><Link href={mode === "login" ? "/signup" : "/login"}>
-      {mode === "login" ? "Create an account" : "Already have an account? Log in"}
-    </Link></p>
+    {showGoogle && <>
+      <p className="my-4 text-center" aria-hidden="true">or</p>
+      <button type="button" className="button w-full" disabled={busy} onClick={() => void continueWithGoogle()}>
+        Continue with Google
+      </button>
+    </>}
+    {mode === "login"
+      ? (!ready || registration) && <p className="mt-4">Don&apos;t have an account? <Link href="/signup">Sign up</Link></p>
+      : <p className="mt-4">Already have an account? <Link href="/login">Log in</Link></p>}
   </main>;
 }

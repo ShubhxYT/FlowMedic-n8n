@@ -20,6 +20,7 @@ from app.schemas.auth import (
     Credentials,
     InviteAccept,
     InviteCreate,
+    LoginCredentials,
     MemberUpdate,
     WorkspaceSelection,
 )
@@ -58,7 +59,11 @@ def csrf(request: Request, response: Response):
     set_cookie(
         response, request.app.state.settings, CSRF_COOKIE, token, httponly=False, max_age=43200
     )
-    return {"registration_enabled": request.app.state.settings.auth_registration_enabled}
+    config = request.app.state.settings
+    return {
+        "registration_enabled": config.auth_registration_enabled,
+        "google_enabled": config.google_enabled,
+    }
 
 
 @router.post("/signup", status_code=201)
@@ -87,7 +92,7 @@ def signup(payload: Credentials, request: Request, response: Response, session: 
 
 
 @router.post("/login")
-def login(payload: Credentials, request: Request, response: Response, session: IdentityDB):
+def login(payload: LoginCredentials, request: Request, response: Response, session: IdentityDB):
     check_csrf(request)
     throttle(request, session, payload.email)
     user = AuthRepository(session).user_by_email(payload.email)

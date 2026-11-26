@@ -1,6 +1,7 @@
 export const SESSION_COOKIE = "fm_session";
 export const CSRF_COOKIE = "fm_csrf";
-export const cookieNames = new Set([SESSION_COOKIE, CSRF_COOKIE]);
+export const OAUTH_COOKIE = "fm_oauth";
+export const cookieNames = new Set([SESSION_COOKIE, CSRF_COOKIE, OAUTH_COOKIE]);
 
 export function selectedCookies(header: string): string {
   return header.split(";").map((part) => part.trim()).filter((part) =>

@@ -74,6 +74,17 @@ diagnosis is certain.
 - **CSRF and origins.** Every mutation requires an exact trusted `Origin` plus a CSRF cookie /
   header pair. Authenticated mutations also verify the session's stored CSRF hash.
 - **Throttling.** Signup/login use durable 15-minute budgets per account and per peer address.
+- **Sign up.** The login page links to email/password sign-up whenever
+  `AUTH_REGISTRATION_ENABLED=true` (new passwords need 12+ characters).
+- **Continue with Google.** OpenID Connect authorization-code flow with PKCE, scopes
+  `openid email profile` only. It links to an existing account with the same verified email, or
+  creates one while registration is open. The button stays hidden until `GOOGLE_CLIENT_ID` and
+  `GOOGLE_CLIENT_SECRET` are set. Add `https://<dashboard-host>/auth/google/callback` (or your
+  `GOOGLE_REDIRECT_URI`) as an authorized redirect URI on a Google Cloud OAuth client of type
+  "Web application".
+- **Demo login.** `DEMO_ACCOUNT_EMAIL` + `DEMO_ACCOUNT_PASSWORD` create one shared demo account
+  with its own workspace at startup. It is created once and never overwritten; its password may
+  be shorter than the signup policy but is still Argon2-hashed.
 
 The legacy operator account is provisioned explicitly with the local CLI; public signup can
 never claim legacy records. See [account operations](docs/operations.md#accounts-and-workspace-ownership).
@@ -305,6 +316,9 @@ key, or service token in any `NEXT_PUBLIC_` variable.
 | `PUBLIC_DEMO_READONLY` | `false` | Public read-only demo; requires `DEMO_MODE=true` |
 | `CORS_ALLOW_ORIGINS` | local dashboard origins | Comma-separated frontend origins permitted by FastAPI |
 | `AUTH_REGISTRATION_ENABLED` | `false` | Explicit policy for public private-workspace signup |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enable "Continue with Google" (OpenID Connect) |
+| `GOOGLE_REDIRECT_URI` | `<first trusted origin>/auth/google/callback` | Must match the Google OAuth client's authorized redirect URI |
+| `DEMO_ACCOUNT_EMAIL` / `DEMO_ACCOUNT_PASSWORD` | unset | Optional shared demo login created once at startup |
 | `AUTH_ALLOW_INSECURE_COOKIES` | `false` | Allow HTTP cookies only for loopback development origins |
 | `AUTH_TRUSTED_ORIGINS` | `https://localhost:3000` | Exact allowed mutation origins, comma-separated |
 | `AUTH_SESSION_SECONDS` | `43200` | Absolute session lifetime |
@@ -357,6 +371,8 @@ by default; `API_DOCS_ENABLED=true` enables them for private development only.
 | `GET` | `/api/v1/auth/csrf` | Issue/read the CSRF cookie and registration policy |
 | `POST` | `/api/v1/auth/signup` | Create a private workspace (when registration is enabled) |
 | `POST` | `/api/v1/auth/login` | Create a revocable session and rotate the CSRF token |
+| `POST` | `/api/v1/auth/google/start` | Return the Google authorize URL and set the one-time flow cookie |
+| `POST` | `/api/v1/auth/google/callback` | Exchange the Google code, validate the ID token, sign in or sign up |
 | `POST` | `/api/v1/auth/logout` | Revoke the current session |
 | `GET` | `/api/v1/auth/me` | Current user, workspace, role, and memberships |
 | `POST` | `/api/v1/auth/workspace` | Switch to another membership; rotates the session |
@@ -494,6 +510,9 @@ Run these inside the API environment (or `docker compose exec api ...`):
 ```bash
 # Provision the legacy workspace admin (idempotent, hidden password prompt)
 python -m app.commands.bootstrap_owner owner@example.com
+
+# Create the shared demo login if it does not exist (reads DEMO_ACCOUNT_PASSWORD or prompts)
+python -m app.commands.demo_account test@example.com
 
 # Reset a password, disable an account, or revoke every session
 python -m app.commands.account reset owner@example.com

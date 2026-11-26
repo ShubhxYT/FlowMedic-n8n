@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     auth_session_seconds: int = Field(default=43200, ge=300, le=604800)
     auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
     api_docs_enabled: bool = False
+    # Optional shared demo login provisioned at startup (created once, never overwritten).
+    # Optional "Continue with Google" (OpenID Connect, scopes: openid email profile).
+    # Hidden unless both the client id and secret are configured.
+    google_client_id: str = Field(default="", max_length=256)
+    google_client_secret: SecretStr = SecretStr("")
+    # Defaults to <first AUTH_TRUSTED_ORIGINS entry>/auth/google/callback.
+    google_redirect_uri: str = Field(default="", max_length=512)
+    demo_account_email: str = Field(default="", max_length=254)
+    demo_account_password: SecretStr = SecretStr("")
     diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
     demo_mode: bool = False
     public_demo_readonly: bool = False
@@ -49,6 +58,17 @@ class Settings(BaseSettings):
     outbound_allow_local_http: bool = False
     outbound_egress_enforced: bool = False
     deployment_environment: Literal["development", "production"] = "production"
+
+    @property
+    def google_enabled(self):
+        return bool(self.google_client_id and self.google_client_secret.get_secret_value())
+
+    @property
+    def google_callback_uri(self):
+        if self.google_redirect_uri:
+            return self.google_redirect_uri
+        origin = self.auth_trusted_origins.split(",")[0].strip()
+        return f"{origin}/auth/google/callback"
 
     @field_validator("n8n_base_url", "ai_base_url")
     @classmethod
@@ -103,6 +123,8 @@ class Settings(BaseSettings):
                 raise ValueError("Insecure cookies are permitted only on local development origins")
         if self.n8n_api_key.get_secret_value() and not self.n8n_base_url:
             raise ValueError("N8N_BASE_URL is required when N8N_API_KEY is set")
+        if bool(self.demo_account_email) != bool(self.demo_account_password.get_secret_value()):
+            raise ValueError("DEMO_ACCOUNT_EMAIL and DEMO_ACCOUNT_PASSWORD must be set together")
         if self.public_demo_readonly and not self.demo_mode:
             raise ValueError("PUBLIC_DEMO_READONLY requires DEMO_MODE=true")
         if self.demo_mode and (

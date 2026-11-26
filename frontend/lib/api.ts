@@ -55,7 +55,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== "undefined" && !["/api/v1/auth/login", "/api/v1/auth/signup"].includes(path)) {
+    if (response.status === 401 && typeof window !== "undefined" && !["/api/v1/auth/login", "/api/v1/auth/signup", "/api/v1/auth/google/callback"].includes(path)) {
       window.dispatchEvent(new Event("flowmedic:session-expired"));
     }
     const body = (await response.json().catch(() => ({}))) as ApiErrorBody;
@@ -73,7 +73,9 @@ const jsonBody = (value: unknown) => ({
 });
 
 export const api = {
-  csrf: () => request<{ registration_enabled: boolean }>("/api/v1/auth/csrf"),
+  csrf: () => request<{ registration_enabled: boolean; google_enabled?: boolean }>("/api/v1/auth/csrf"),
+  googleStart: () => request<{ url: string }>("/api/v1/auth/google/start", { method: "POST" }),
+  googleCallback: (code: string, state: string) => request("/api/v1/auth/google/callback", jsonBody({ code, state })),
   me: () => request<CurrentUser>("/api/v1/auth/me"),
   login: (email: string, password: string) => request("/api/v1/auth/login", jsonBody({ email, password })),
   signup: (email: string, password: string) => request("/api/v1/auth/signup", jsonBody({ email, password })),

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthForm } from "@/components/auth-form";
 import { api } from "@/lib/api";
 
-vi.mock("@/lib/api", () => ({ api: { csrf: vi.fn(), login: vi.fn(), signup: vi.fn() } }));
+vi.mock("@/lib/api", () => ({ api: { csrf: vi.fn(), login: vi.fn(), signup: vi.fn(), googleStart: vi.fn() } }));
 
 beforeEach(() => {
   vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: true });
@@ -20,6 +20,29 @@ describe("account forms", () => {
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "long-password-123" } });
     fireEvent.click(button);
     expect(await screen.findByRole("alert")).toHaveTextContent("Email or password is incorrect");
+  });
+  it("offers sign up from the login page only while registration is open", async () => {
+    const { unmount } = render(<AuthForm mode="login" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled());
+    expect(screen.getByRole("link", { name: "Sign up" })).toHaveAttribute("href", "/signup");
+    unmount();
+    vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: false });
+    render(<AuthForm mode="login" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled());
+    expect(screen.queryByRole("link", { name: "Sign up" })).toBeNull();
+  });
+  it("hides Continue with Google until the server reports it is configured", async () => {
+    const { unmount } = render(<AuthForm mode="login" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled());
+    expect(screen.queryByRole("button", { name: "Continue with Google" })).toBeNull();
+    unmount();
+    vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: true, google_enabled: true });
+    vi.mocked(api.googleStart).mockRejectedValue(new Error("Google sign-in is not configured"));
+    render(<AuthForm mode="signup" />);
+    const google = await screen.findByRole("button", { name: "Continue with Google" });
+    fireEvent.click(google);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Google sign-in is not configured");
+    expect(api.googleStart).toHaveBeenCalledOnce();
   });
   it("disables signup when registration is closed", async () => {
     vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: false });

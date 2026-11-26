@@ -3,6 +3,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+def normalize_email(value):
+    value = value.strip().casefold()
+    if value.count("@") != 1 or any(c.isspace() for c in value):
+        raise ValueError("Invalid email")
+    local, domain = value.split("@")
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        raise ValueError("Invalid email")
+    return value
+
+
 class Credentials(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: str = Field(min_length=3, max_length=254)
@@ -11,13 +21,12 @@ class Credentials(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value):
-        value = value.strip().casefold()
-        if value.count("@") != 1 or any(c.isspace() for c in value):
-            raise ValueError("Invalid email")
-        local, domain = value.split("@")
-        if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
-            raise ValueError("Invalid email")
-        return value
+        return normalize_email(value)
+
+
+class LoginCredentials(Credentials):
+    # Login never enforces the signup policy, so operator-provisioned accounts can sign in.
+    password: SecretStr = Field(min_length=1, max_length=128)
 
 
 class WorkspaceSelection(BaseModel):
