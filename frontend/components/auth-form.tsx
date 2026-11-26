@@ -40,7 +40,7 @@ export function AuthForm({ mode, onSuccess }: {
     {mode === "signup" && ready && !registration && <p role="status">Registration is closed. Contact the operator.</p>}
     <form onSubmit={(event) => void submit(event)} className="grid gap-4">
       <label>Email<input className="block w-full rounded border p-2" name="email" type="email" required maxLength={254} autoComplete="username" /></label>
-      <label>Password<input className="block w-full rounded border p-2" name="password" type="password" required minLength={12} maxLength={128} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
+      <label>Password<input className="block w-full rounded border p-2" name="password" type="password" required minLength={mode === "signup" ? 12 : 1} maxLength={128} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
       <button className="button" disabled={!ready || busy || mode === "signup" && !registration}>
         {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
       </button>

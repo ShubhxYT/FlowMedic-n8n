@@ -20,6 +20,7 @@ from app.schemas.auth import (
     Credentials,
     InviteAccept,
     InviteCreate,
+    LoginCredentials,
     MemberUpdate,
     WorkspaceSelection,
 )
@@ -87,7 +88,7 @@ def signup(payload: Credentials, request: Request, response: Response, session: 
 
 
 @router.post("/login")
-def login(payload: Credentials, request: Request, response: Response, session: IdentityDB):
+def login(payload: LoginCredentials, request: Request, response: Response, session: IdentityDB):
     check_csrf(request)
     throttle(request, session, payload.email)
     user = AuthRepository(session).user_by_email(payload.email)

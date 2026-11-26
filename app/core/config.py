@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     auth_session_seconds: int = Field(default=43200, ge=300, le=604800)
     auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
     api_docs_enabled: bool = False
+    # Optional shared demo login provisioned at startup (created once, never overwritten).
+    demo_account_email: str = Field(default="", max_length=254)
+    demo_account_password: SecretStr = SecretStr("")
     diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
     demo_mode: bool = False
     public_demo_readonly: bool = False
@@ -103,6 +106,8 @@ class Settings(BaseSettings):
                 raise ValueError("Insecure cookies are permitted only on local development origins")
         if self.n8n_api_key.get_secret_value() and not self.n8n_base_url:
             raise ValueError("N8N_BASE_URL is required when N8N_API_KEY is set")
+        if bool(self.demo_account_email) != bool(self.demo_account_password.get_secret_value()):
+            raise ValueError("DEMO_ACCOUNT_EMAIL and DEMO_ACCOUNT_PASSWORD must be set together")
         if self.public_demo_readonly and not self.demo_mode:
             raise ValueError("PUBLIC_DEMO_READONLY requires DEMO_MODE=true")
         if self.demo_mode and (

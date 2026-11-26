@@ -13,6 +13,7 @@ from app.ai.providers import MockDiagnosisProvider
 from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.api.settings import router as settings_router
+from app.commands.demo_account import ensure_demo_account
 from app.core.config import Settings
 from app.core.database import create_database
 from app.core.encryption import ConnectionCipher
@@ -67,6 +68,12 @@ def create_app(
             # Isolated test databases are initialized directly, without Alembic.
             Base.metadata.create_all(engine)
         ensure_reserved_workspaces(factory)
+        if config.demo_account_email:
+            ensure_demo_account(
+                factory,
+                config.demo_account_email,
+                config.demo_account_password.get_secret_value(),
+            )
         cipher = None
         keys = config.connection_encryption_keys.get_secret_value()
         if not config.demo_mode and keys:
