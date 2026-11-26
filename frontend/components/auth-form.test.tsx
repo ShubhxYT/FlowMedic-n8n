@@ -21,6 +21,16 @@ describe("account forms", () => {
     fireEvent.click(button);
     expect(await screen.findByRole("alert")).toHaveTextContent("Email or password is incorrect");
   });
+  it("offers sign up from the login page only while registration is open", async () => {
+    const { unmount } = render(<AuthForm mode="login" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled());
+    expect(screen.getByRole("link", { name: "Sign up" })).toHaveAttribute("href", "/signup");
+    unmount();
+    vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: false });
+    render(<AuthForm mode="login" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Log in" })).toBeEnabled());
+    expect(screen.queryByRole("link", { name: "Sign up" })).toBeNull();
+  });
   it("disables signup when registration is closed", async () => {
     vi.mocked(api.csrf).mockResolvedValue({ registration_enabled: false });
     render(<AuthForm mode="signup" />);

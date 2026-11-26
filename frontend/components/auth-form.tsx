@@ -45,8 +45,8 @@ export function AuthForm({ mode, onSuccess }: {
         {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
       </button>
     </form>
-    <p className="mt-4"><Link href={mode === "login" ? "/signup" : "/login"}>
-      {mode === "login" ? "Create an account" : "Already have an account? Log in"}
-    </Link></p>
+    {mode === "login"
+      ? (!ready || registration) && <p className="mt-4">Don&apos;t have an account? <Link href="/signup">Sign up</Link></p>
+      : <p className="mt-4">Already have an account? <Link href="/login">Log in</Link></p>}
   </main>;
 }
