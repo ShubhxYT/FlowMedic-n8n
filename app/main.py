@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException
 from app import models  # noqa: F401
 from app.ai.providers import MockDiagnosisProvider
 from app.api.auth import router as auth_router
+from app.api.google_auth import router as google_router
 from app.api.routes import router
 from app.api.settings import router as settings_router
 from app.commands.demo_account import ensure_demo_account
@@ -58,6 +59,7 @@ def create_app(
     ai_transport=None,
     webhook_transport=None,
     outbound_transport=None,
+    google_transport=None,
 ):
     config = settings or Settings()
 
@@ -202,6 +204,7 @@ def create_app(
         openapi_url="/openapi.json" if config.api_docs_enabled else None,
     )
     app.state.settings = config
+    app.state.google_transport = google_transport
     app.state.diagnose_limiter = RateLimiter(config.diagnose_rate_limit_per_minute, 60)
 
     @app.middleware("http")
@@ -264,6 +267,7 @@ def create_app(
         }
 
     app.include_router(auth_router)
+    app.include_router(google_router)
     app.include_router(settings_router)
     app.include_router(
         router,

@@ -59,7 +59,11 @@ def csrf(request: Request, response: Response):
     set_cookie(
         response, request.app.state.settings, CSRF_COOKIE, token, httponly=False, max_age=43200
     )
-    return {"registration_enabled": request.app.state.settings.auth_registration_enabled}
+    config = request.app.state.settings
+    return {
+        "registration_enabled": config.auth_registration_enabled,
+        "google_enabled": config.google_enabled,
+    }
 
 
 @router.post("/signup", status_code=201)

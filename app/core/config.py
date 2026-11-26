@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     auth_invite_seconds: int = Field(default=86400, ge=300, le=604800)
     api_docs_enabled: bool = False
     # Optional shared demo login provisioned at startup (created once, never overwritten).
+    # Optional "Continue with Google" (OpenID Connect, scopes: openid email profile).
+    # Hidden unless both the client id and secret are configured.
+    google_client_id: str = Field(default="", max_length=256)
+    google_client_secret: SecretStr = SecretStr("")
+    # Defaults to <first AUTH_TRUSTED_ORIGINS entry>/auth/google/callback.
+    google_redirect_uri: str = Field(default="", max_length=512)
     demo_account_email: str = Field(default="", max_length=254)
     demo_account_password: SecretStr = SecretStr("")
     diagnose_rate_limit_per_minute: int = Field(default=5, ge=1, le=600)
@@ -52,6 +58,17 @@ class Settings(BaseSettings):
     outbound_allow_local_http: bool = False
     outbound_egress_enforced: bool = False
     deployment_environment: Literal["development", "production"] = "production"
+
+    @property
+    def google_enabled(self):
+        return bool(self.google_client_id and self.google_client_secret.get_secret_value())
+
+    @property
+    def google_callback_uri(self):
+        if self.google_redirect_uri:
+            return self.google_redirect_uri
+        origin = self.auth_trusted_origins.split(",")[0].strip()
+        return f"{origin}/auth/google/callback"
 
     @field_validator("n8n_base_url", "ai_base_url")
     @classmethod
